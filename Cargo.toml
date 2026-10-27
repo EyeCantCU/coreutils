@@ -430,6 +430,13 @@ openssl = [
   "sha512sum?/openssl",
   "uucore/openssl",
 ]
+# "feat_fips" == drop the pure-Rust digest fallback so that a libcrypto
+# refusal (FIPS mode, legacy-off builds) is a hard failure rather than a
+# silent computation outside the validated module. Implies `openssl`.
+# Enabling `uucore/fips` is enough: cargo unifies features, so every utility
+# in the build sees it. The name carries the `feat_` prefix so build.rs does
+# not mistake it for a utility name.
+feat_fips = ["openssl", "uucore/fips"]
 # "test_risky_names" == enable tests that create problematic file names (would make a network share inaccessible to Windows, breaks SVN on Mac OS, etc.)
 test_risky_names = []
 # * only build `uudoc` when `--feature uudoc` is activated

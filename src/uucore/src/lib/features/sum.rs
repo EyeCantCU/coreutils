@@ -497,11 +497,16 @@ impl_digest_common!(Sha512, 512);
 // e.g. MD5/SHA-1 in strict legacy-off builds), `Hasher::new` returns Err.
 // To avoid panicking at construction time, each type carries a PureRust
 // fallback variant built from the same crate the non-OpenSSL path uses.
+//
+// The `fips` feature compiles that fallback out. A build claiming FIPS
+// compliance must not quietly compute a digest outside the validated module
+// when libcrypto declines to produce one, so failing is the only option left.
 #[cfg(feature = "openssl")]
 macro_rules! impl_digest_openssl {
     ($algo_type:ident, $size:literal, $md:expr, $rust_type:ty) => {
         pub enum $algo_type {
             OpenSsl(openssl::hash::Hasher),
+            #[cfg(not(feature = "fips"))]
             PureRust($rust_type),
         }
 
@@ -513,7 +518,14 @@ macro_rules! impl_digest_openssl {
             fn default() -> Self {
                 match openssl::hash::Hasher::new($md) {
                     Ok(h) => Self::OpenSsl(h),
+                    #[cfg(not(feature = "fips"))]
                     Err(_) => Self::PureRust(<$rust_type>::default()),
+                    #[cfg(feature = "fips")]
+                    Err(e) => panic!(
+                        "{}: libcrypto refused the algorithm and the pure-Rust \
+                         fallback is compiled out by the `fips` feature: {e}",
+                        stringify!($algo_type),
+                    ),
                 }
             }
         }
@@ -524,6 +536,7 @@ macro_rules! impl_digest_openssl {
                     Self::OpenSsl(h) => {
                         h.update(input).expect("OpenSSL hasher update failed");
                     }
+                    #[cfg(not(feature = "fips"))]
                     Self::PureRust(h) => digest::Digest::update(h, input),
                 }
             }
@@ -535,6 +548,7 @@ macro_rules! impl_digest_openssl {
                         let result = h.finish().expect("OpenSSL hasher finish failed");
                         out.copy_from_slice(&result);
                     }
+                    #[cfg(not(feature = "fips"))]
                     Self::PureRust(h) => {
                         let result = digest::Digest::finalize_reset(h);
                         out.copy_from_slice(&result);

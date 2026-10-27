@@ -223,6 +223,9 @@ systemd_logind = ["utmpx", "libc"]
 # pure-Rust crates. This dramatically speeds up checksum utilities on CPUs
 # without SHA-NI by using OpenSSL's optimized assembly implementations.
 openssl = ["dep:openssl"]
+# Remove the pure-Rust digest fallback, so a libcrypto refusal is fatal
+# instead of silently computing outside the validated module.
+fips = ["openssl"]
 update-control = ["parser"]
 utf8 = []
 utmpx = ["time", "time/macros", "libc", "dns-lookup"]
