@@ -428,6 +428,8 @@ impl<'a> State<'a> {
         print_unpaired: bool,
     ) -> UResult<Self> {
         let file_buf = if name == "-" {
+            #[cfg(all(unix, not(target_os = "fuchsia")))]
+            uucore::signals::ensure_stdin_open()?;
             Box::new(stdin.lock()) as Box<dyn BufRead>
         } else {
             let file = File::open(name).map_err_context(|| format!("{}", name.maybe_quote()))?;

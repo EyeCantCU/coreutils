@@ -957,3 +957,18 @@ fn test_missing_key_is_empty_key() {
         .succeeds()
         .stdout_only("1002 bob\n");
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" join - /dev/null"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_contains("Bad file descriptor");
+}
