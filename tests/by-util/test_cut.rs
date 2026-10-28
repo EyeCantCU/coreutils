@@ -1314,7 +1314,7 @@ fn test_read_error() {
     new_ucmd!()
         .args(&["-c1", "/proc/self/mem"])
         .fails_with_code(1)
-        .stderr_is("cut: Input/output error\n");
+        .stderr_is("cut: /proc/self/mem: Input/output error\n");
 }
 
 /// Lines longer than the input buffer are cut piece by piece; the result must
@@ -1524,4 +1524,31 @@ fn test_stdbuf_line_buffered_stdout() {
         .make_assertion()
         .with_current_output()
         .stdout_only("a\n");
+}
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = uutests::util::TestScenario::new(uutests::util_name!());
+    scene.fixtures.write("file", "ab\n");
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" cut -b1 - file"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stdout_is("a\n")
+        .stderr_is("cut: -: Bad file descriptor\n");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_read_error_is_named() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.mkdir("dir");
+    ucmd.args(&["-f1", "dir", "dir"])
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("cut: dir: Is a directory\ncut: dir: Is a directory\n");
 }
