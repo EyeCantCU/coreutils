@@ -4015,3 +4015,15 @@ fn test_closed_stdin() {
         .no_stdout()
         .stderr_is("cksum: 'standard input': Bad file descriptor\n");
 }
+
+/// A `--check` report that cannot be written is diagnosed.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_check_write_error() {
+    new_ucmd!()
+        .args(&["-a", "md5", "--check"])
+        .pipe_in("d41d8cd98f00b204e9800998ecf8427e  /dev/null\n")
+        .set_stdout(std::fs::File::create("/dev/full").unwrap())
+        .fails_with_code(1)
+        .stderr_is("cksum: write error: No space left on device\n");
+}
