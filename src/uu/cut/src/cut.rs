@@ -8,7 +8,7 @@
 use bstr::io::BufReadExt;
 use clap::builder::{PossibleValue, ValueParser};
 use clap::{Arg, ArgAction, ArgMatches, Command};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write, stdin, stdout};
 use std::path::Path;
@@ -1177,6 +1177,36 @@ fn cut_fields<R: Read, W: Write>(
     }
 }
 
+/// Reader that names its input in the read errors it returns, so they can be
+/// told apart from write errors once the cutting functions report them.
+struct NamedReader<'a, R> {
+    inner: R,
+    name: &'a OsStr,
+}
+
+impl<R: Read> Read for NamedReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf).map_err(|e| {
+            std::io::Error::new(
+                e.kind(),
+                format!("{}: {}", self.name.maybe_quote(), strip_errno(&e)),
+            )
+        })
+    }
+}
+
+fn cut_reader<R: Read, W: Write>(reader: R, name: &OsStr, out: &mut W, mode: &Mode) -> UResult<()> {
+    let reader = NamedReader {
+        inner: reader,
+        name,
+    };
+    match mode {
+        Mode::Bytes(ranges, opts) => cut_chars(reader, out, ranges, opts, false),
+        Mode::Characters(ranges, opts) => cut_chars(reader, out, ranges, opts, true),
+        Mode::Fields(ranges, opts) => cut_fields(reader, out, ranges, opts),
+    }
+}
+
 fn cut_files<'a, I>(filenames: I, mode: &Mode)
 where
     I: IntoIterator<Item = &'a OsString>,
@@ -1194,17 +1224,21 @@ where
                 continue;
             }
 
-            show_if_err!(match mode {
-                Mode::Bytes(ranges, opts) => cut_chars(stdin(), &mut out, ranges, opts, false),
-                Mode::Characters(ranges, opts) => cut_chars(stdin(), &mut out, ranges, opts, true),
-                Mode::Fields(ranges, opts) => cut_fields(stdin(), &mut out, ranges, opts),
-            });
+            #[cfg(all(unix, not(target_os = "fuchsia")))]
+            let stdin_open = uucore::signals::ensure_stdin_open()
+                .map_err_context(|| filename.maybe_quote().to_string());
+            #[cfg(not(all(unix, not(target_os = "fuchsia"))))]
+            let stdin_open: UResult<()> = Ok(());
+
+            show_if_err!(stdin_open.and_then(|()| cut_reader(stdin(), filename, &mut out, mode)));
 
             stdin_read = true;
         } else {
             let path = Path::new(filename);
 
-            if path.is_dir() {
+            // Reading a directory fails with EISDIR on Linux, so let the read
+            // report it (or any other read error) there.
+            if cfg!(not(any(target_os = "linux", target_os = "android"))) && path.is_dir() {
                 show_error!(
                     "{}: {}",
                     filename.maybe_quote(),
@@ -1217,17 +1251,7 @@ where
             show_if_err!(
                 File::open(path)
                     .map_err_context(|| filename.maybe_quote().to_string())
-                    .and_then(|file| {
-                        match &mode {
-                            Mode::Bytes(ranges, opts) => {
-                                cut_chars(file, &mut out, ranges, opts, false)
-                            }
-                            Mode::Characters(ranges, opts) => {
-                                cut_chars(file, &mut out, ranges, opts, true)
-                            }
-                            Mode::Fields(ranges, opts) => cut_fields(file, &mut out, ranges, opts),
-                        }
-                    })
+                    .and_then(|file| cut_reader(file, filename, &mut out, mode))
             );
         }
     }
