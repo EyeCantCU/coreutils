@@ -9,7 +9,7 @@
 //! for resolving block sizes from environment variables and defaults.
 //! This module centralizes that logic.
 
-use super::parse_size::parse_size_non_zero_u64;
+use super::parse_size::{ParseSizeError, parse_size_non_zero_u64, parse_size_u64};
 
 /// Result of looking up a block size from environment variables.
 ///
@@ -60,6 +60,68 @@ pub fn block_size_from_env(vars: &[&str]) -> BlockSizeEnv {
         }
     }
     BlockSizeEnv::NotSet
+}
+
+/// A block size as written in `--block-size` or a `*BLOCK_SIZE` variable.
+///
+/// The syntax is an optional apostrophe, then a SIZE. When the SIZE is a unit
+/// with no number in front of it (`K`, `MiB`, `kB`), sizes are printed with
+/// that unit after them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockSizeSpec {
+    /// The block size in bytes.
+    pub bytes: u64,
+    /// The value started with an apostrophe, asking for digit grouping.
+    pub grouping: bool,
+    /// The unit to print after each size, if any.
+    pub unit: Option<String>,
+}
+
+/// Parse a block size, accepting a leading apostrophe.
+///
+/// A zero size is not rejected here; callers report it with their own message.
+/// Errors are about the value after the apostrophe.
+pub fn parse_block_size_spec(s: &str) -> Result<BlockSizeSpec, ParseSizeError> {
+    let (grouping, size) = match s.strip_prefix('\'') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    };
+    let bytes = parse_size_u64(size)?;
+    Ok(BlockSizeSpec {
+        bytes,
+        grouping,
+        unit: display_unit(size),
+    })
+}
+
+/// The unit printed after sizes for a SIZE made of a unit alone.
+///
+/// The letter is shown in upper case, except for a decimal kilo (`kB`).
+fn display_unit(size: &str) -> Option<String> {
+    let mut chars = size.chars();
+    let letter = chars.next()?.to_ascii_uppercase();
+    if !"KMGTPEZYRQ".contains(letter) {
+        return None;
+    }
+    match chars.as_str() {
+        "" => Some(letter.to_string()),
+        "iB" => Some(format!("{letter}iB")),
+        "B" if letter == 'K' => Some("kB".to_string()),
+        "B" => Some(format!("{letter}B")),
+        _ => None,
+    }
+}
+
+/// Look up a block size from the given environment variable names, in order,
+/// accepting the full [`parse_block_size_spec`] syntax.
+///
+/// As with [`block_size_from_env`], the first set variable wins; `None` is
+/// returned when it is invalid or zero, or when no variable is set.
+pub fn block_size_spec_from_env(vars: &[&str]) -> Option<BlockSizeSpec> {
+    let value = vars.iter().find_map(|var| std::env::var(var).ok())?;
+    parse_block_size_spec(&value)
+        .ok()
+        .filter(|spec| spec.bytes != 0)
 }
 
 /// Default block size when no env var or flag is set.
@@ -343,6 +405,54 @@ mod tests {
         );
 
         clear_env_vars(&["BLOCKSIZE"]);
+    }
+
+    #[test]
+    fn test_parse_block_size_spec() {
+        let spec = |bytes, grouping, unit: Option<&str>| BlockSizeSpec {
+            bytes,
+            grouping,
+            unit: unit.map(String::from),
+        };
+        assert_eq!(parse_block_size_spec("1M"), Ok(spec(1 << 20, false, None)));
+        assert_eq!(parse_block_size_spec("'1M"), Ok(spec(1 << 20, true, None)));
+        assert_eq!(
+            parse_block_size_spec("'m"),
+            Ok(spec(1 << 20, true, Some("M")))
+        );
+        assert_eq!(parse_block_size_spec("k"), Ok(spec(1024, false, Some("K"))));
+        assert_eq!(
+            parse_block_size_spec("kiB"),
+            Ok(spec(1024, false, Some("KiB")))
+        );
+        assert_eq!(
+            parse_block_size_spec("KB"),
+            Ok(spec(1000, false, Some("kB")))
+        );
+        assert_eq!(
+            parse_block_size_spec("mB"),
+            Ok(spec(1_000_000, false, Some("MB")))
+        );
+        assert_eq!(parse_block_size_spec("1024"), Ok(spec(1024, false, None)));
+        assert!(parse_block_size_spec("'").is_err());
+        assert!(parse_block_size_spec("''k").is_err());
+    }
+
+    #[test]
+    fn test_block_size_spec_from_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let vars = ["TEST_PROG_SPEC", "TEST_PROG_SPEC2"];
+        clear_env_vars(&vars);
+        assert_eq!(block_size_spec_from_env(&vars), None);
+
+        set_env_var("TEST_PROG_SPEC2", "'KiB");
+        let spec = block_size_spec_from_env(&vars).unwrap();
+        assert_eq!((spec.bytes, spec.unit.as_deref()), (1024, Some("KiB")));
+
+        set_env_var("TEST_PROG_SPEC", "0");
+        assert_eq!(block_size_spec_from_env(&vars), None);
+
+        clear_env_vars(&vars);
     }
 
     #[test]
