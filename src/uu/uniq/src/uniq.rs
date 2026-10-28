@@ -879,7 +879,7 @@ fn open_output_file(out_file_name: Option<&OsStr>) -> UResult<Box<dyn Write>> {
             Box::new(BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, out_file))
         }
         _ => Box::new(BufWriter::with_capacity(
-            OUTPUT_BUFFER_CAPACITY,
+            uucore::stdbuf::stdout_buffer_capacity(OUTPUT_BUFFER_CAPACITY),
             stdout().lock(),
         )),
     })
