@@ -48,6 +48,7 @@ du-help-time-style = show times using style STYLE: full-iso, long-iso, iso, +FOR
 # Error messages
 du-error-invalid-max-depth = invalid maximum depth { $depth }
 du-error-summarize-depth-conflict = summarizing conflicts with --max-depth={ $depth }
+du-warning-summarize-same-as-depth-zero = summarizing is the same as using --max-depth=0
 du-error-invalid-time-style = invalid argument { $style } for 'time style'
   Valid arguments are:
     - 'full-iso'

@@ -48,6 +48,7 @@ du-help-time-style = montrer les heures en utilisant le style STYLE : full-iso, 
 # Messages d'erreur
 du-error-invalid-max-depth = profondeur maximale invalide { $depth }
 du-error-summarize-depth-conflict = la synthèse entre en conflit avec --max-depth={ $depth }
+du-warning-summarize-same-as-depth-zero = la synthèse équivaut à utiliser --max-depth=0
 du-error-invalid-time-style = argument invalide { $style } pour 'style de temps'
   Les arguments valides sont :
     - 'full-iso'
