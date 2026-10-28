@@ -219,10 +219,37 @@ fn test_helper(file_name: &str, term: &str) {
 fn test_dircolors_for_dir_as_file() {
     let result = new_ucmd!().args(&["-c", "/"]).fails();
     result.no_stdout();
-    assert_eq!(
-        result.stderr_str().trim(),
-        "dircolors: expected file, got directory '/'",
-    );
+    let expected = if cfg!(any(target_os = "linux", target_os = "android")) {
+        "dircolors: /: read error: Is a directory"
+    } else {
+        "dircolors: expected file, got directory '/'"
+    };
+    assert_eq!(result.stderr_str().trim(), expected);
+}
+
+#[test]
+#[cfg(all(target_os = "linux", not(wasi_runner)))]
+fn test_dircolors_read_error() {
+    new_ucmd!()
+        .args(&["-b", "/proc/self/mem"])
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("dircolors: /proc/self/mem: read error: Input/output error\n");
+}
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_dircolors_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = uutests::util::TestScenario::new(uutests::util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" dircolors -b -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("dircolors: -: read error: Bad file descriptor\n");
 }
 
 #[test]
