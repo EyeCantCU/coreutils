@@ -139,6 +139,11 @@ pub fn base_app(about: String, usage: String) -> Command {
 }
 
 pub fn get_input(config: &Config) -> UResult<Box<dyn BufRead>> {
+    #[cfg(all(unix, not(target_os = "fuchsia")))]
+    if config.to_read.is_none() {
+        uucore::signals::ensure_stdin_open()
+            .map_err(|err| USimpleError::new(1, format_read_error(&err)))?;
+    }
     match &config.to_read {
         Some(path_buf) => {
             let file =
