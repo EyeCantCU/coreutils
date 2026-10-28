@@ -2369,3 +2369,18 @@ fn test_obsolete_lines_not_read_after_double_dash() {
         .fails()
         .stderr_contains("cannot open '-1' for reading");
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // A stdin closed at startup is reported, not read as empty.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" split -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("split: -: Bad file descriptor\n");
+    assert!(!scene.fixtures.file_exists("xaa"));
+}
