@@ -8,11 +8,7 @@
 
 #[cfg(not(any(target_os = "fuchsia", target_os = "haiku")))]
 use libc::pid_t;
-#[cfg(not(any(target_os = "fuchsia", target_os = "haiku")))]
-use nix::sys::signal::{self as nix_signal, SigHandler};
 use nix::sys::signal::{SigSet, Signal};
-#[cfg(not(any(target_os = "fuchsia", target_os = "haiku")))]
-use nix::unistd::Pid;
 use rustix::process::Signal as RixSignal;
 use std::io;
 #[cfg(not(any(target_os = "fuchsia", target_os = "haiku")))]
@@ -28,15 +24,11 @@ use super::{ChildExt, TimeoutRet};
 #[cfg(not(any(target_os = "fuchsia", target_os = "haiku")))]
 impl ChildExt for Child {
     fn send_signal(&mut self, signal: usize) -> io::Result<()> {
-        let pid = Pid::from_raw(self.id() as pid_t);
-        let result = if signal == 0 {
-            nix_signal::kill(pid, None)
-        } else {
-            let signal = Signal::try_from(signal as i32)
-                .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
-            nix_signal::kill(pid, Some(signal))
-        };
-        result.map_err(|e| io::Error::from_raw_os_error(e as i32))
+        // Use the raw signal number: nix's `Signal` cannot represent the
+        // realtime signals (SIGRTMIN..=SIGRTMAX), which must still be sent.
+        let signal = raw_signal(signal)?;
+        // SAFETY: plain FFI call; `kill` has no memory-safety preconditions.
+        check_errno(unsafe { libc::kill(self.id() as pid_t, signal) })
     }
 
     fn send_signal_group(&mut self, signal: usize) -> io::Result<()> {
@@ -45,24 +37,34 @@ impl ChildExt for Child {
         // process group, it will receive this signal along with all other processes
         // in the group. If the child has created its own process group (via setpgid),
         // it won't receive this group signal, but will have received the direct signal.
+        let signal = raw_signal(signal)?;
 
         // Signal 0 is special - it just checks if process exists, doesn't send anything.
         // No need to manipulate signal handlers for it.
         if signal == 0 {
-            return nix_signal::kill(Pid::from_raw(0), None)
-                .map_err(|e| io::Error::from_raw_os_error(e as i32));
+            // SAFETY: plain FFI call; `kill` has no memory-safety preconditions.
+            return check_errno(unsafe { libc::kill(0, 0) });
         }
 
-        let signal = Signal::try_from(signal as i32)
-            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
-
         // Ignore the signal temporarily so we don't receive it ourselves.
-        let old_handler = unsafe { nix_signal::signal(signal, SigHandler::SigIgn) }
-            .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
-        let result = nix_signal::kill(Pid::from_raw(0), Some(signal));
-        // Restore the old handler
-        let _ = unsafe { nix_signal::signal(signal, old_handler) };
-        result.map_err(|e| io::Error::from_raw_os_error(e as i32))
+        // SAFETY: `sigaction` structs are plain data, fully initialized here,
+        // and only passed by valid pointers to `sigaction(2)`.
+        unsafe {
+            let mut ignore: libc::sigaction = std::mem::zeroed();
+            ignore.sa_sigaction = libc::SIG_IGN;
+            libc::sigemptyset(&raw mut ignore.sa_mask);
+            let mut old: libc::sigaction = std::mem::zeroed();
+            check_errno(libc::sigaction(signal, &raw const ignore, &raw mut old))?;
+            let result = check_errno(libc::kill(0, signal));
+            // If the signal is blocked here (as during `wait_or_timeout`), the
+            // copy sent to ourselves stays pending despite being ignored and
+            // would later be mistaken for an external signal. Setting SIG_IGN
+            // again discards such a pending signal.
+            libc::sigaction(signal, &raw const ignore, std::ptr::null_mut());
+            // Restore the old handler
+            libc::sigaction(signal, &raw const old, std::ptr::null_mut());
+            result
+        }
     }
 
     fn wait_or_timeout(&mut self, timeout: Duration, ignore_term: bool) -> io::Result<TimeoutRet> {
@@ -91,6 +93,22 @@ impl ChildExt for Child {
             }
             remaining = timeout.saturating_sub(start.elapsed());
         }
+    }
+}
+
+/// Convert a signal number to the C type, rejecting out-of-range values.
+#[cfg(not(any(target_os = "fuchsia", target_os = "haiku")))]
+fn raw_signal(signal: usize) -> io::Result<libc::c_int> {
+    libc::c_int::try_from(signal).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))
+}
+
+/// Map a libc `0` / `-1` return value to an [`io::Result`].
+#[cfg(not(any(target_os = "fuchsia", target_os = "haiku")))]
+fn check_errno(ret: libc::c_int) -> io::Result<()> {
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 
