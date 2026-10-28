@@ -15,7 +15,7 @@ use lscolors::Colorable;
 use rustc_hash::FxHashMap;
 use rustc_hash::FxHashSet;
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::{
@@ -818,6 +818,8 @@ pub struct PathData<'a> {
     must_dereference: bool,
     command_line: bool,
     is_dot_dir: bool,
+    // Set when the entry was listed by `read_dir` but no longer exists.
+    vanished: Cell<bool>,
 }
 
 impl<'a> PathData<'a> {
@@ -900,6 +902,7 @@ impl<'a> PathData<'a> {
             must_dereference,
             command_line,
             is_dot_dir,
+            vanished: Cell::new(false),
         }
     }
 
@@ -932,6 +935,19 @@ impl<'a> PathData<'a> {
                             && let Ok(file) = self.path().read_link()
                         {
                             return file.symlink_metadata().ok();
+                        }
+                        // An entry removed since the directory was read is silently
+                        // omitted; with dereferencing, only if the entry itself is gone.
+                        if err.kind() == ErrorKind::NotFound
+                            && !self.command_line
+                            && (!self.must_dereference
+                                || self
+                                    .path()
+                                    .symlink_metadata()
+                                    .is_err_and(|e| e.kind() == ErrorKind::NotFound))
+                        {
+                            self.vanished.set(true);
+                            return None;
                         }
                         show!(LsError::IOErrorContext(
                             self.path().to_path_buf(),
@@ -1343,7 +1359,7 @@ fn collect_directory_entries<O: LsOutput>(
 }
 
 fn write_directory_entries<O: LsOutput>(
-    entries: &[PathData],
+    entries: &mut Vec<PathData>,
     config: &Config,
     output: &mut O,
 ) -> UResult<()> {
@@ -1356,6 +1372,8 @@ fn write_directory_entries<O: LsOutput>(
             .sum();
         output.write_total(scale_block_bytes(total_bytes, config), config)?;
     }
+
+    entries.retain(|entry| !entry.vanished.get());
 
     if matches!(output.stream_mode(), StreamMode::Streaming) {
         for entry in entries {
