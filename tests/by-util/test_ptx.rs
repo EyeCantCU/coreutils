@@ -520,3 +520,17 @@ fn test_repeated_flags_are_accepted() {
             "                               hello   world\n"
         ));
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // A stdin closed at startup is reported, not read as empty.
+    let scene = uutests::util::TestScenario::new(uutests::util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" ptx -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("ptx: '-': Bad file descriptor\n");
+}
