@@ -8,7 +8,7 @@
 use clap::{Arg, ArgAction, Command};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Write, stdin, stdout};
+use std::io::{self, BufRead, BufReader, Read, Write, stdin, stdout};
 use std::num::IntErrorKind;
 use std::path::Path;
 use unicode_width::UnicodeWidthChar;
@@ -229,7 +229,12 @@ fn fold(
     for filename in filenames {
         let mut stdin_buf;
         let mut file_buf;
-        let buffer = BufReader::new(if filename == "-" {
+        let input = if filename == "-" {
+            #[cfg(all(unix, not(target_os = "fuchsia")))]
+            if let Err(e) = uucore::signals::ensure_stdin_open() {
+                show!(e.map_err_context(|| filename.maybe_quote().to_string()));
+                continue;
+            }
             stdin_buf = stdin();
             &mut stdin_buf as &mut dyn Read
         } else {
@@ -244,6 +249,11 @@ fn fold(
                 }
             }
             &mut file_buf as &mut dyn Read
+        };
+        let mut read_error = None;
+        let buffer = BufReader::new(EndOnError {
+            inner: input,
+            error: &mut read_error,
         });
 
         if bytes {
@@ -256,12 +266,38 @@ fn fold(
             };
             fold_file(buffer, spaces, width, mode, &mut output)?;
         }
+
+        // Like GNU, a read error ends only this input.
+        if let Some(e) = read_error {
+            show!(e.map_err_context(|| {
+                uucore::quoting_style::locale_aware_shell_escape(filename)
+            }));
+        }
     }
 
     output
         .flush()
         .map_err_context(|| translate!("fold-error-failed-to-write"))?;
     Ok(())
+}
+
+/// Reader that turns a read error into the end of the input, keeping the
+/// error so that it can be reported once the input has been folded.
+struct EndOnError<'a, R> {
+    inner: R,
+    error: &'a mut Option<io::Error>,
+}
+
+impl<R: Read> Read for EndOnError<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.inner.read(buf) {
+            Err(e) if e.kind() != io::ErrorKind::Interrupted => {
+                self.error.get_or_insert(e);
+                Ok(0)
+            }
+            result => result,
+        }
+    }
 }
 
 /// Fold `file` to fit `width` (number of columns), counting all characters as

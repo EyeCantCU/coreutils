@@ -899,3 +899,30 @@ fn test_stdbuf_line_buffered_stdout() {
         .with_current_output()
         .stdout_only("ab\nc\n");
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" fold -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("fold: -: Bad file descriptor\n");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_read_error_continues_with_next_file() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.mkdir("dir");
+    at.write("file", "abc\n");
+    ucmd.args(&["-w2", "dir", "file", "dir"])
+        .fails_with_code(1)
+        .stdout_is("ab\nc\n")
+        .stderr_is("fold: dir: Is a directory\nfold: dir: Is a directory\n");
+}
