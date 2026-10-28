@@ -114,7 +114,8 @@ enum Deref {
 enum SizeFormat {
     HumanDecimal,
     HumanBinary,
-    BlockSize(u64),
+    /// A fixed block size, and the unit to print after each size.
+    BlockSize(u64, Option<String>),
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy)]
@@ -302,35 +303,42 @@ fn get_file_info(path: &Path, _metadata: &Metadata) -> Option<FileInfo> {
     result
 }
 
-fn read_block_size(s: Option<&str>, diag_args: Option<&[OsString]>) -> UResult<u64> {
+/// The block size and the unit to print after sizes, from `--block-size` or
+/// else the environment.
+fn read_block_size(
+    s: Option<&str>,
+    diag_args: Option<&[OsString]>,
+) -> UResult<(u64, Option<String>)> {
     if let Some(s) = s {
-        parse_size_u64(s)
-            .and_then(|bytes| {
+        parse_block_size::parse_block_size_spec(s)
+            .and_then(|spec| {
                 // A block size of zero is rejected here rather than by the
                 // caller, so that it goes through the caret path like every
                 // other bad SIZE.
-                if bytes == 0 {
+                if spec.bytes == 0 {
                     Err(ParseSizeError::ParseFailure(s.to_string()))
                 } else {
-                    Ok(bytes)
+                    Ok((spec.bytes, spec.unit))
                 }
             })
             .map_err(|e| {
                 let message = format_error_message(&e, s, options::BLOCK_SIZE);
+                // The caret skips a leading apostrophe, which is not part of the SIZE.
+                let size_at = usize::from(s.starts_with('\'') && s.len() > 1);
                 e.size_value_error(
                     diag_args,
                     &OptionValue::new(s, 'B', options::BLOCK_SIZE),
-                    0,
+                    size_at,
                     &message,
                     USimpleError::new(1, message.clone()),
                 )
             })
-    } else if let Some(bytes) =
-        parse_block_size::block_size_from_env(&["DU_BLOCK_SIZE", "BLOCK_SIZE", "BLOCKSIZE"]).found()
+    } else if let Some(spec) =
+        parse_block_size::block_size_spec_from_env(&["DU_BLOCK_SIZE", "BLOCK_SIZE", "BLOCKSIZE"])
     {
-        Ok(bytes)
+        Ok((spec.bytes, spec.unit))
     } else {
-        Ok(parse_block_size::default_block_size())
+        Ok((parse_block_size::default_block_size(), None))
     }
 }
 
@@ -909,12 +917,16 @@ impl StatPrinter {
                 size,
                 uucore::format::human::SizeFormat::Binary,
             ),
-            SizeFormat::BlockSize(block_size) => {
+            SizeFormat::BlockSize(block_size, ref unit) => {
                 if self.inodes {
                     // we ignore block size (-B) with --inodes
                     size.to_string()
                 } else {
-                    size.div_ceil(block_size).to_string()
+                    let blocks = size.div_ceil(block_size);
+                    match unit {
+                        Some(unit) => format!("{blocks}{unit}"),
+                        None => blocks.to_string(),
+                    }
                 }
             }
         }
@@ -1010,23 +1022,24 @@ fn get_size_format_flag_arg_index_if_present(matches: &ArgMatches, arg: &str) ->
 fn parse_size_format(matches: &ArgMatches, diag_args: Option<&[OsString]>) -> UResult<SizeFormat> {
     // `read_block_size` falls back to the environment and rejects a zero block
     // size itself, so that the caret can point at the offending value.
-    let block_size_value_or_default_fallback = SizeFormat::BlockSize(read_block_size(
+    let (block_size, unit) = read_block_size(
         matches
             .get_one::<String>(options::BLOCK_SIZE)
             .map(AsRef::as_ref),
         diag_args,
-    )?);
+    )?;
+    let block_size_value_or_default_fallback = SizeFormat::BlockSize(block_size, unit);
     let candidates = [
         (
-            SizeFormat::BlockSize(1),
+            SizeFormat::BlockSize(1, None),
             get_size_format_flag_arg_index_if_present(matches, options::BYTES),
         ),
         (
-            SizeFormat::BlockSize(1024),
+            SizeFormat::BlockSize(1024, None),
             get_size_format_flag_arg_index_if_present(matches, options::BLOCK_SIZE_1K),
         ),
         (
-            SizeFormat::BlockSize(1024 * 1024),
+            SizeFormat::BlockSize(1024 * 1024, None),
             get_size_format_flag_arg_index_if_present(matches, options::BLOCK_SIZE_1M),
         ),
         (
@@ -1631,9 +1644,16 @@ mod test_du {
 
     #[test]
     fn test_read_block_size() {
-        let test_data = [Some("1024".to_string()), Some("K".to_string()), None];
+        let test_data = [Some("1024".to_string()), Some("1K".to_string()), None];
         for it in &test_data {
-            assert!(matches!(read_block_size(it.as_deref(), None), Ok(1024)));
+            assert!(matches!(
+                read_block_size(it.as_deref(), None),
+                Ok((1024, None))
+            ));
         }
+        assert!(matches!(
+            read_block_size(Some("'K"), None),
+            Ok((1024, Some(unit))) if unit == "K"
+        ));
     }
 }
