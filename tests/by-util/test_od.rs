@@ -1709,3 +1709,19 @@ fn test_width_invalid_numbers() {
             .stderr_only(format!("od: {message}\n"));
     }
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.write("file", "ab");
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" od - file"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stdout_contains("0000000 061141\n")
+        .stderr_is("od: 'standard input': Bad file descriptor\n");
+}

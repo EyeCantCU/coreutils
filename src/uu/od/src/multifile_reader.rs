@@ -84,6 +84,16 @@ impl MultifileReader<'_> {
             }
             match self.ni.remove(0) {
                 InputSource::Stdin => {
+                    #[cfg(all(unix, not(target_os = "fuchsia")))]
+                    if let Err(e) = uucore::signals::ensure_stdin_open() {
+                        show_error!(
+                            "{}: {}",
+                            translate!("od-standard-input").quote(),
+                            strip_errno(&e)
+                        );
+                        self.any_err = true;
+                        continue;
+                    }
                     // In order to pass GNU compatibility tests, when the client passes in the
                     // `-N` flag we must not read any bytes beyond that limit. As such, we need
                     // to disable the default buffering for stdin below.
