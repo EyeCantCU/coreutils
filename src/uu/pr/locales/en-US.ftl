@@ -90,6 +90,9 @@ pr-help-show-control-chars = use hat notation (^G) and octal backslash notation
 pr-help-show-nonprinting = use octal backslash notation
 pr-help-help = Print help information
 
+# Name of standard input in error messages
+pr-standard-input = standard input
+
 # Page header text
 pr-page = Page
 

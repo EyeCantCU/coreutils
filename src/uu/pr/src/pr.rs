@@ -8,7 +8,7 @@
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, metadata};
-use std::io::{self, BufRead, BufReader, BufWriter, Write, stdin, stdout};
+use std::io::{self, BufRead, BufReader, Write, stdin, stdout};
 use std::time::SystemTime;
 
 use uucore::display::Quotable;
@@ -62,7 +62,6 @@ mod options {
     pub const SHOW_NONPRINTING: &str = "show-nonprinting";
 }
 
-/// How a short option uses the rest of its argument.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OptKind {
     Flag,
@@ -70,7 +69,6 @@ enum OptKind {
     Optional,
 }
 
-/// Short options, the long option they stand for, and how they take a value.
 const SHORT_OPTIONS: &[(u8, &str, OptKind)] = &[
     (b'a', options::ACROSS, OptKind::Flag),
     (b'b', options::COLUMN_DOWN, OptKind::Flag),
@@ -98,8 +96,7 @@ const SHORT_OPTIONS: &[(u8, &str, OptKind)] = &[
     (b'W', options::PAGE_WIDTH, OptKind::Required),
 ];
 
-/// Long options that need a value, used to keep that value away from the
-/// rewriting of short options and legacy operands.
+/// Long options whose value may be a separate argument.
 const LONG_OPTIONS_WITH_VALUE: &[&str] = &[
     options::PAGES,
     options::HEADER,
@@ -112,7 +109,6 @@ const LONG_OPTIONS_WITH_VALUE: &[&str] = &[
     options::INDENT,
 ];
 
-/// All long option names, used to resolve abbreviations.
 const LONG_OPTIONS: &[&str] = &[
     options::PAGES,
     options::HEADER,
@@ -144,7 +140,6 @@ const LONG_OPTIONS: &[&str] = &[
 
 #[derive(Debug, thiserror::Error)]
 enum PrError {
-    /// A message printed as `pr: <msg>`, exit status 1.
     #[error("{0}")]
     Message(String),
 
@@ -406,7 +401,8 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         Err(e) => return Err(USimpleError::new(1, e.to_string())),
     };
 
-    let mut out = BufWriter::new(stdout().lock());
+    // Under `stdbuf -oL` each line is written as soon as it is complete.
+    let mut out = uucore::stdbuf::stdout_buf_writer(stdout().lock());
     let mut failed = false;
     let result = if settings.merge {
         print_merged(&files, &settings, &mut out, &mut failed)
@@ -428,7 +424,6 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     }
 }
 
-/// Build an `OsString` from bytes taken out of an argument.
 fn os_from_bytes(bytes: &[u8]) -> OsString {
     #[cfg(unix)]
     {
@@ -447,11 +442,8 @@ fn long_with_value(name: &str, value: &[u8]) -> OsString {
     s
 }
 
-/// Rewrite the command line into a form clap can parse.
-///
-/// pr has options with optional values that must be attached (`-n3`, `-e`, `-S:`),
-/// numeric options (`-3`), and legacy `+FIRST[:LAST]` operands. Short options are
-/// turned into their long equivalents, with any value attached after `=`.
+/// Rewrite short options, `-N` and `+FIRST[:LAST]` operands into long options clap can parse.
+/// pr's optional values must be attached (`-n3`, `-e`, `-S:`), which clap cannot express.
 fn rewrite_arguments(args: &[OsString]) -> Vec<OsString> {
     let mut result = Vec::with_capacity(args.len());
     let mut iter = args.iter();
@@ -544,7 +536,6 @@ fn rewrite_arguments(args: &[OsString]) -> Vec<OsString> {
     result
 }
 
-/// The long option that the possibly abbreviated `name` stands for.
 fn resolve_long_option(name: &[u8]) -> Option<&'static str> {
     if let Some(exact) = LONG_OPTIONS.iter().find(|o| o.as_bytes() == name) {
         return Some(exact);
@@ -558,19 +549,16 @@ fn resolve_long_option(name: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// Whether the (possibly abbreviated) long option `name` takes a separate value.
 fn long_option_needs_value(name: &[u8]) -> bool {
     resolve_long_option(name).is_some_and(|o| LONG_OPTIONS_WITH_VALUE.contains(&o))
 }
 
-/// Outcome of parsing a decimal integer the way pr's numeric options accept it.
 enum IntError {
     Invalid,
     TooLarge,
 }
 
-/// Parse an integer with optional leading blanks and sign. Values outside the
-/// range of a 32-bit signed integer are reported as too large.
+/// Values outside the i32 range are reported as too large.
 fn parse_int(s: &[u8]) -> Result<i64, IntError> {
     let s = s.trim_ascii_start();
     let (negative, digits) = match s.first() {
@@ -603,9 +591,7 @@ fn errno_too_large() -> String {
     translate!("pr-error-value-too-large")
 }
 
-/// Parse the value of a numeric option, which must lie in `min..=i32::MAX`.
-/// Values below `min` are out of range, or too large when `negative_too_large`
-/// is set (an unsigned option given a negative value).
+/// Parse a numeric option value in `min..=i32::MAX`; a negative value for an unsigned option is too large.
 fn parse_numeric_option(
     raw: &str,
     description: &str,
@@ -649,7 +635,6 @@ enum PageRangeError {
     TooLarge,
 }
 
-/// Parse an unsigned page number at the start of `s`, returning it with the rest of `s`.
 fn parse_page_number(s: &[u8]) -> Result<(u64, &[u8]), PageRangeError> {
     let s = s.trim_ascii_start();
     let s = s.strip_prefix(b"+").unwrap_or(s);
@@ -672,7 +657,6 @@ fn parse_page_number(s: &[u8]) -> Result<(u64, &[u8]), PageRangeError> {
     Ok((value, rest))
 }
 
-/// Parse `FIRST[:LAST]`.
 fn parse_page_range(s: &[u8]) -> Result<(u64, Option<u64>), PageRangeError> {
     let (first, rest) = parse_page_number(s)?;
     let last = match rest {
@@ -692,15 +676,13 @@ fn parse_page_range(s: &[u8]) -> Result<(u64, Option<u64>), PageRangeError> {
     Ok((first, last))
 }
 
-/// A character and a width, as given to `-e`, `-i` and `-n`.
 #[derive(Clone, Copy)]
 struct CharWidth {
     ch: u8,
     width: usize,
 }
 
-/// Parse the optional `[CHAR][WIDTH]` arguments of `-e`, `-i` or `-n`. Each
-/// use of the option changes only what its argument gives.
+/// Parse the optional `[CHAR][WIDTH]` argument of `-e`, `-i` or `-n`; each use changes only what it gives.
 fn parse_char_width(
     option: char,
     matches: &ArgMatches,
@@ -767,7 +749,6 @@ fn parse_char_width_value(
 /// How nonprinting characters are shown.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ControlChars {
-    /// Leave them alone.
     Raw,
     /// `-c`: hat notation for control characters, octal for the rest.
     Hat,
@@ -775,7 +756,6 @@ enum ControlChars {
     Octal,
 }
 
-/// Line numbering settings.
 #[derive(Clone, Copy)]
 struct Numbering {
     separator: u8,
@@ -792,7 +772,6 @@ impl Numbering {
         }
     }
 
-    /// The last `digits` characters of the number, right-aligned.
     fn format(&self, number: i64) -> Vec<u8> {
         let s = number.to_string();
         let s = s.as_bytes();
@@ -805,27 +784,21 @@ impl Numbering {
 
 #[derive(Clone)]
 struct Settings {
-    /// Print the five-line header and trailer on each page.
     header_enabled: bool,
-    /// Number of text lines on a page.
     body_lines: usize,
     double_space: bool,
-    /// End pages with a form feed instead of blank lines.
     form_feed: bool,
     /// Copy form feeds found in the input when there is no header (`-t` but not `-T`).
     keep_input_form_feeds: bool,
     first_page: u64,
     last_page: Option<u64>,
-    /// Number of text columns for a single file.
     columns: usize,
     across: bool,
     merge: bool,
     /// Multi-column output without truncation and alignment.
     join: bool,
-    /// Width of each text column in multi-column output.
     column_width: usize,
     separator: Vec<u8>,
-    /// Width used to lay out the header line.
     page_width: usize,
     /// Truncation width of single-column output (`-W`).
     single_width: Option<usize>,
@@ -839,7 +812,6 @@ struct Settings {
     control_chars: ControlChars,
     header: Option<Vec<u8>>,
     date_format: String,
-    /// Do not report files that cannot be read (`-r`).
     quiet: bool,
 }
 
@@ -1059,7 +1031,6 @@ impl Settings {
         })
     }
 
-    /// Number of input lines that make up one column of a page.
     fn rows_per_page(&self) -> usize {
         if self.double_space {
             (self.body_lines / 2).max(1)
@@ -1088,7 +1059,6 @@ fn get_date_format(matches: &ArgMatches) -> String {
     .to_string()
 }
 
-/// How a line of input ended.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LineEnd {
     Newline,
@@ -1102,33 +1072,44 @@ struct Input {
     name: OsString,
     /// A newline right after a form feed that ended a line belongs to that form feed.
     skip_newline: bool,
-    /// Set once reading failed.
     failed: bool,
     /// The read error, reported once the output so far has been written.
     pending_error: Option<io::Error>,
-    quiet: bool,
+}
+
+fn display_name(name: &OsStr) -> String {
+    if name == FILE_STDIN {
+        translate!("pr-standard-input").quote().to_string()
+    } else {
+        name.maybe_quote().to_string()
+    }
 }
 
 /// Report an error after the output written so far, so that a merged stdout and
 /// stderr show them in the order they happened.
 fn report_error(out: &mut impl Write, name: &OsStr, e: &io::Error) {
     let _ = out.flush();
-    show_error!("{}: {}", name.maybe_quote(), strip_errno(e));
+    show_error!("{}: {}", display_name(name), strip_errno(e));
 }
 
 fn open_input(name: &OsStr, settings: &Settings, out: &mut impl Write) -> Option<Input> {
     let quiet = settings.quiet;
-    let reader: Box<dyn BufRead> = if name == FILE_STDIN {
-        Box::new(BufReader::new(stdin()))
+    let opened = if name == FILE_STDIN {
+        // A stdin that was closed at startup must not read as empty input.
+        uucore::signals::ensure_stdin_open()
+            .map(|()| Box::new(BufReader::new(stdin())) as Box<dyn BufRead>)
     } else {
-        match File::open(name) {
-            Ok(f) => Box::new(BufReader::new(f)),
-            Err(e) => {
-                if !quiet {
-                    report_error(out, name, &e);
-                }
-                return None;
+        File::open(name).map(|f| Box::new(BufReader::new(f)) as Box<dyn BufRead>)
+    };
+    let reader = match opened {
+        Ok(reader) => reader,
+        Err(e) => {
+            // -r only silences files that cannot be opened; stdin is always open
+            // as far as pr is concerned, so its failure is a read error.
+            if !quiet || name == FILE_STDIN {
+                report_error(out, name, &e);
             }
+            return None;
         }
     };
     Some(Input {
@@ -1137,15 +1118,13 @@ fn open_input(name: &OsStr, settings: &Settings, out: &mut impl Write) -> Option
         skip_newline: false,
         failed: false,
         pending_error: None,
-        quiet,
     })
 }
 
 impl Input {
+    /// Report a read error, which `-r` does not silence.
     fn report(&mut self, e: io::Error) {
-        if !self.quiet {
-            self.pending_error = Some(e);
-        }
+        self.pending_error = Some(e);
         self.failed = true;
     }
 
@@ -1156,7 +1135,6 @@ impl Input {
         }
     }
 
-    /// Look at the next byte without consuming it.
     fn peek(&mut self) -> Option<u8> {
         if self.failed {
             return None;
@@ -1188,7 +1166,6 @@ impl Input {
         self.peek().is_none()
     }
 
-    /// Consume a form feed if it comes next.
     fn take_form_feed(&mut self) -> bool {
         if self.peek() == Some(FF) {
             self.reader.consume(1);
@@ -1199,7 +1176,6 @@ impl Input {
         }
     }
 
-    /// Pass the bytes of the next line to `f`, without its terminator.
     fn read_line(
         &mut self,
         mut f: impl FnMut(&[u8]) -> Result<(), PrError>,
@@ -1239,7 +1215,6 @@ impl Input {
     }
 }
 
-/// Destination of rendered text.
 trait Sink {
     /// Text where spaces may become tabs, TAB moves to the next tab stop,
     /// backspace moves back one position, and every other byte takes one position.
@@ -1259,8 +1234,6 @@ impl Sink for Vec<u8> {
     }
 }
 
-/// Writes one output line, keeping track of the output position so that runs
-/// of spaces can be replaced by tabs.
 struct LineWriter<'a, W: Write> {
     out: &'a mut W,
     position: usize,
@@ -1292,7 +1265,6 @@ impl<'a, W: Write> LineWriter<'a, W> {
         Ok(())
     }
 
-    /// Write out the pending run of spaces, using tabs where they reach a tab stop.
     fn flush_spaces(&mut self) -> Result<(), PrError> {
         let n = std::mem::take(&mut self.pending_spaces);
         if n == 0 {
@@ -1325,7 +1297,6 @@ impl<'a, W: Write> LineWriter<'a, W> {
         Ok(())
     }
 
-    /// Write a column separator; each of its bytes takes one position.
     fn separator(&mut self, sep: &[u8]) -> Result<(), PrError> {
         for &b in sep {
             if b == b' ' {
@@ -1339,7 +1310,6 @@ impl<'a, W: Write> LineWriter<'a, W> {
         Ok(())
     }
 
-    /// Write a TAB that moves to the next tab stop.
     fn tab(&mut self) -> Result<(), PrError> {
         self.flush_spaces()?;
         self.write_raw(&[TAB])?;
@@ -1405,13 +1375,10 @@ impl<W: Write> Sink for LineWriter<'_, W> {
 /// Turns the bytes of an input line into output text: expands input tabs,
 /// shows nonprinting characters, and truncates the line.
 struct Renderer {
-    /// Position used for tab expansion and backspacing.
     input_position: usize,
-    /// Position used for truncation.
     width_used: usize,
     limit: Option<usize>,
     stopped: bool,
-    /// Some of the line was rendered.
     emitted: bool,
     /// Added to the input position once the first byte has been handled.
     deferred_start: usize,
@@ -1455,8 +1422,7 @@ impl Renderer {
         Ok(())
     }
 
-    /// The first character of the line did not fit, so nothing of it is shown.
-    /// Such a line gets no line number.
+    /// The first character did not fit, so nothing is shown and the line gets no number.
     fn truncated_at_start(&self) -> bool {
         self.stopped && !self.emitted
     }
@@ -1546,7 +1512,6 @@ impl Renderer {
     }
 }
 
-/// Header line: date on the left, the title centered, the page number on the right.
 fn write_header(
     out: &mut impl Write,
     settings: &Settings,
@@ -1574,7 +1539,6 @@ fn write_header(
     out.write_all(&line).map_err(PrError::Write)
 }
 
-/// What is printed around the text of every page.
 struct PageFrame {
     date: Vec<u8>,
     title: Vec<u8>,
@@ -1614,7 +1578,6 @@ impl PageFrame {
         Ok(())
     }
 
-    /// Finish a page.
     fn footer(out: &mut impl Write, settings: &Settings, end: PageEnd) -> Result<(), PrError> {
         let rows = end.rows;
         let text = if settings.header_enabled {
@@ -1647,10 +1610,8 @@ impl PageFrame {
     }
 }
 
-/// How a page of input ended.
 #[derive(Default, Clone, Copy)]
 struct PageEnd {
-    /// Rows of text on the page.
     rows: usize,
     /// A form feed in the input ended the page.
     form_feed: bool,
@@ -1676,7 +1637,6 @@ impl PageEnd {
     }
 }
 
-/// Tracks page and line numbers while reading a file.
 struct Counter {
     page: u64,
     line: i64,
@@ -1734,6 +1694,8 @@ fn print_file(
     settings: &Settings,
     out: &mut impl Write,
 ) -> Result<bool, PrError> {
+    // Output for earlier files goes out before any error about this one.
+    out.flush().map_err(PrError::Write)?;
     let frame = PageFrame::new(settings, (!settings.merge).then_some(name));
     let mut counter = Counter::new();
     let mut reached_last = false;
@@ -1762,7 +1724,6 @@ fn print_file(
     Ok(!input.failed)
 }
 
-/// Print one page of single-column output, streaming each line.
 fn print_single_page(
     input: &mut Input,
     settings: &Settings,
@@ -1868,13 +1829,10 @@ impl<W: Write> Sink for PrefixedLine<'_, W> {
     }
 }
 
-/// A rendered line of input, to be printed as one text column.
 #[derive(Default)]
 struct Cell {
     bytes: Vec<u8>,
-    /// Width of the text, not counting the line number.
     text_width: usize,
-    /// Nothing of the line fit in the column.
     truncated_at_start: bool,
 }
 
@@ -1891,10 +1849,8 @@ impl Numbering {
     }
 }
 
-/// Render the next line of `input` as a text column, preceded by its number if
-/// `number` is given. In aligned output the cell, number included, is truncated
-/// to `width`. Also returns whether the line was numbered: a line of which
-/// nothing fits is shown empty and without a number.
+/// Render the next line of `input` as a text column, preceded by its number if `number` is given.
+/// Returns whether the line was numbered: a line of which nothing fits is shown empty, unnumbered.
 fn read_cell(
     input: &mut Input,
     settings: &Settings,
@@ -1930,8 +1886,6 @@ fn read_cell(
     Ok((cell, end, true))
 }
 
-/// Write one row of text columns. `columns` holds the cells in order; a `None`
-/// cell is an empty column that is still padded and separated.
 fn write_row(
     out: &mut impl Write,
     settings: &Settings,
@@ -1944,9 +1898,8 @@ fn write_row(
     w.spaces(settings.margin)?;
     let separator_width = settings.separator.len();
     let step = settings.column_width + separator_width;
-    // Joined columns printed down the page count tab stops after a column
-    // separator as if the column before it had started at the left edge
-    // (after the margin, for the first column), unless it ended in spaces.
+    // Joined columns down the page count tab stops after a separator as if the
+    // previous column had started at the left edge, unless it ended in spaces.
     let restart_positions = settings.join && !settings.merge && !settings.across;
     for (i, cell) in columns.iter().enumerate() {
         // Across the page, a column that shows nothing of its line does not
@@ -1985,7 +1938,6 @@ fn write_row(
     w.end_line(double_space)
 }
 
-/// Print one page of multi-column output for a single file.
 fn print_columns_page(
     input: &mut Input,
     settings: &Settings,
@@ -2077,9 +2029,8 @@ fn print_columns_page(
             table.push(cells_in_row);
         }
     }
-    // Without a header, the last row is not double spaced when its last line
-    // ended with a form feed, or when the page (down) or the row (across)
-    // is not full.
+    // Without a header, the last row is not double spaced if it ended with a
+    // form feed or the page (down) or row (across) is not full.
     let short_end = last_line_form_feed
         || if settings.across {
             !cells.len().is_multiple_of(columns)
@@ -2094,15 +2045,12 @@ fn print_columns_page(
     Ok(end(table.len()))
 }
 
-/// State of one file while merging.
 struct MergeInput {
     input: Input,
-    /// The file has no more lines for the current page.
     done: bool,
     ended_by_form_feed: bool,
 }
 
-/// Print all files side by side, one per column.
 fn print_merged(
     files: &[OsString],
     settings: &Settings,

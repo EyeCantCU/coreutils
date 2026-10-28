@@ -1762,3 +1762,49 @@ fn test_error_follows_earlier_output_in_merged_stream() {
         "{text}"
     );
 }
+
+#[test]
+#[cfg(unix)]
+fn test_stdbuf_line_buffered_stdout() {
+    // Each line is written before the input ends when `_STDBUF_O=L`.
+    let mut child = new_ucmd!()
+        .env("_STDBUF_O", "L")
+        .args(&["-t", "-n"])
+        .set_stdin(std::process::Stdio::piped())
+        .run_no_wait();
+    child.write_in("1\n");
+    child.delay(500);
+    child
+        .kill()
+        .make_assertion()
+        .with_current_output()
+        .stdout_only("    1\t1\n");
+}
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Fails with EBADF even with -r; the shell starts pr with fd 0 closed.
+    for args in ["pr -", "pr -r -"] {
+        let scene = TestScenario::new(util_name!());
+        scene
+            .cmd("sh")
+            .args(&["-c", &format!("exec <&-; \"$0\" {args}")])
+            .arg(&scene.bin_path)
+            .fails_with_code(1)
+            .no_stdout()
+            .stderr_is("pr: 'standard input': Bad file descriptor\n");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn test_stdin_read_error_names_standard_input() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.mkdir("d");
+    ucmd.args(&["-t", "-"])
+        .set_stdin(std::fs::File::open(at.plus("d")).unwrap())
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("pr: 'standard input': Is a directory\n");
+}
