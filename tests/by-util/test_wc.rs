@@ -958,3 +958,18 @@ fn test_posixly_correct_whitespace() {
         .succeeds()
         .stdout_is("1\n");
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = uutests::util::TestScenario::new(uutests::util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" wc -l -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stdout_is("0 -\n")
+        .stderr_contains("Bad file descriptor");
+}

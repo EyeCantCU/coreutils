@@ -693,7 +693,13 @@ enum CountResult {
 /// return an error: ([`WordCount`], `Option<io::Error>`).
 fn word_count_from_input(input: &Input<'_>, settings: &Settings) -> CountResult {
     let (total, maybe_err) = match input {
-        Input::Stdin(_) => word_count_from_reader(io::stdin().lock(), settings),
+        Input::Stdin(_) => {
+            #[cfg(all(unix, not(target_os = "fuchsia")))]
+            if let Err(err) = uucore::signals::ensure_stdin_open() {
+                return CountResult::Interrupted(WordCount::default(), err);
+            }
+            word_count_from_reader(io::stdin().lock(), settings)
+        }
         Input::Path(path) => match File::open(path) {
             Ok(f) => word_count_from_reader(f, settings),
             Err(err) => return CountResult::Failure(err),
