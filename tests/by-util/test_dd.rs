@@ -305,7 +305,7 @@ fn test_zero_multiplier_warning() {
             .pipe_in("")
             .succeeds()
             .no_stdout()
-            .stderr_is("dd: warning: '0x' is a zero multiplier; use '00x' if that is intended\ndd: warning: '0x' is a zero multiplier; use '00x' if that is intended\n");
+            .stderr_is("dd: warning: '0x' is a zero multiplier; use '00x' if that is intended\n");
 
         new_ucmd!()
             .args(&[format!("{arg}=1x0x1").as_str(), "status=none"])
@@ -319,8 +319,54 @@ fn test_zero_multiplier_warning() {
             .pipe_in("")
             .succeeds()
             .no_stdout()
-            .stderr_is("dd: warning: '0x' is a zero multiplier; use '00x' if that is intended\ndd: warning: '0x' is a zero multiplier; use '00x' if that is intended\n");
+            .stderr_is("dd: warning: '0x' is a zero multiplier; use '00x' if that is intended\n");
     }
+}
+
+/// A zero factor makes the whole product zero, even when another factor
+/// does not fit in 64 bits; without a zero factor the overflow is an error.
+#[test]
+fn test_zero_factor_with_huge_factor() {
+    let big = "9".repeat(61);
+    for arg in [
+        format!("count=00x{big}"),
+        format!("count={big}x0"),
+        format!("count={big}bx00"),
+        "count=4294967296x4294967296x00".to_string(),
+    ] {
+        new_ucmd!()
+            .args(&["if=/dev/null", arg.as_str(), "status=noxfer"])
+            .succeeds()
+            .no_stdout()
+            .stderr_is("0+0 records in\n0+0 records out\n");
+    }
+    new_ucmd!()
+        .args(&[
+            "if=/dev/null",
+            format!("count=0x{big}").as_str(),
+            "status=none",
+        ])
+        .succeeds()
+        .no_stdout()
+        .stderr_is("dd: warning: '0x' is a zero multiplier; use '00x' if that is intended\n");
+    for arg in [
+        format!("1x{big}"),
+        format!("{big}w"),
+        "4294967296x4294967296".to_string(),
+    ] {
+        new_ucmd!()
+            .arg(format!("count={arg}"))
+            .fails_with_code(1)
+            .no_stdout()
+            .stderr_is(format!(
+                "dd: invalid number: '{arg}': Value too large for defined data type\n"
+            ));
+    }
+    new_ucmd!()
+        .arg(format!("count=0x{big}xjunk"))
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is(format!("dd: invalid number: '0x{big}xjunk'\n"));
 }
 
 #[test]
