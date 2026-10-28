@@ -26,7 +26,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use uucore::error::{FromIo, UResult};
+use uucore::error::{FromIo, UError, UResult};
 
 use crate::{
     GlobalSettings, Output, SortError,
@@ -146,7 +146,10 @@ pub fn merge_with_file_limit<
 
                 let mut tmp_file =
                     Tmp::create(tmp_dir.next_file()?, settings.compress_prog.as_deref())?;
-                merger.write_all_to(settings, tmp_file.as_write())?;
+                let path = tmp_file.path().to_owned();
+                merger.write_all_to(settings, tmp_file.as_write(), |error| {
+                    SortError::TmpWriteFailed { path, error }.into()
+                })?;
                 temporary_files.push(tmp_file.finished_writing()?);
             }
         }
@@ -157,7 +160,10 @@ pub fn merge_with_file_limit<
 
             let mut tmp_file =
                 Tmp::create(tmp_dir.next_file()?, settings.compress_prog.as_deref())?;
-            merger.write_all_to(settings, tmp_file.as_write())?;
+            let path = tmp_file.path().to_owned();
+            merger.write_all_to(settings, tmp_file.as_write(), |error| {
+                SortError::TmpWriteFailed { path, error }.into()
+            })?;
             temporary_files.push(tmp_file.finished_writing()?);
         }
         merge_with_file_limit::<_, _, Tmp>(
@@ -343,15 +349,21 @@ impl FileMerger<'_> {
     /// Write the merged contents to the output file.
     fn write_all(self, settings: &GlobalSettings, output: Output) -> UResult<()> {
         let mut out = output.into_write()?;
-        self.write_all_to(settings, &mut out)
+        self.write_all_to(settings, &mut out, |e| -> Box<dyn UError> {
+            e.map_err_context(|| "write failed".into())
+        })?;
+        out.flush().map_err_context(|| "write failed".into())
     }
 
-    fn write_all_to(mut self, settings: &GlobalSettings, out: &mut impl Write) -> UResult<()> {
+    /// Write the merged contents to `out`, turning a write error into the reported error with `ctx`.
+    fn write_all_to(
+        mut self,
+        settings: &GlobalSettings,
+        out: &mut impl Write,
+        ctx: impl FnOnce(io::Error) -> Box<dyn UError>,
+    ) -> UResult<()> {
         let write_result = loop {
-            match self
-                .write_next(out, settings)
-                .map_err_context(|| "write failed".into())
-            {
+            match self.write_next(out, settings) {
                 Ok(true) => (),
                 Ok(false) => break Ok(()),
                 Err(error) => {
@@ -386,7 +398,7 @@ impl FileMerger<'_> {
         let reader_result = reader_join_handle.join().unwrap();
         // A write failure is what the user needs to hear about; the reader hitting an error
         // on the way down is secondary.
-        write_result.and(reader_result)
+        write_result.map_err(ctx).and(reader_result)
     }
 
     fn write_next(
@@ -450,12 +462,14 @@ impl FileMerger<'_> {
 }
 
 /// Wait for the child to exit and check its exit code.
-fn check_child_success(mut child: Child, program: &str) -> UResult<()> {
+/// `decompress` tells whether `child` was run with `-d`, to decompress.
+fn check_child_success(mut child: Child, program: &str, decompress: bool) -> UResult<()> {
     if matches!(child.wait().map(|e| e.code()), Ok(Some(0) | None) | Err(_)) {
         Ok(())
     } else {
         Err(SortError::CompressProgTerminatedAbnormally {
             prog: program.to_owned(),
+            decompress,
         }
         .into())
     }
@@ -466,6 +480,8 @@ pub trait WriteableTmpFile: Sized {
     type Closed: ClosedTmpFile;
     type InnerWrite: Write;
     fn create(file: (File, PathBuf), compress_prog: Option<&str>) -> UResult<Self>;
+    /// The path of the temporary file.
+    fn path(&self) -> &Path;
     /// Closes the temporary file.
     fn finished_writing(self) -> UResult<Self::Closed>;
     fn as_write(&mut self) -> &mut Self::InnerWrite;
@@ -509,6 +525,10 @@ impl WriteableTmpFile for WriteablePlainTmpFile {
 
     fn finished_writing(self) -> UResult<Self::Closed> {
         Ok(ClosedPlainTmpFile { path: self.path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
     }
 
     fn as_write(&mut self) -> &mut Self::InnerWrite {
@@ -579,9 +599,17 @@ impl WriteableTmpFile for WriteableCompressedTmpFile {
         })
     }
 
-    fn finished_writing(self) -> UResult<Self::Closed> {
+    fn finished_writing(mut self) -> UResult<Self::Closed> {
+        // Flush explicitly: dropping the buffer would discard a failure to
+        // hand the last data to the compression program.
+        let flushed = self.child_stdin.flush();
         drop(self.child_stdin);
-        check_child_success(self.child, &self.compress_prog)?;
+        let child_result = check_child_success(self.child, &self.compress_prog, false);
+        flushed.map_err(|error| SortError::CloseFailed {
+            path: self.path.clone(),
+            error,
+        })?;
+        child_result?;
         Ok(ClosedCompressedTmpFile {
             path: self.path,
             compress_prog: self.compress_prog,
@@ -590,6 +618,10 @@ impl WriteableTmpFile for WriteableCompressedTmpFile {
 
     fn as_write(&mut self) -> &mut Self::InnerWrite {
         &mut self.child_stdin
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
     }
 }
 impl ClosedTmpFile for ClosedCompressedTmpFile {
@@ -623,7 +655,7 @@ impl MergeInput for CompressedTmpMergeInput {
         // Explicitly close stdout before waiting on the child process.
         #[allow(clippy::drop_non_drop)]
         drop(self.child_stdout);
-        check_child_success(self.child, &self.compress_prog)?;
+        check_child_success(self.child, &self.compress_prog, true)?;
         let _ = fs::remove_file(self.path);
         Ok(())
     }

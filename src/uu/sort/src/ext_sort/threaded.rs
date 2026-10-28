@@ -23,7 +23,7 @@ use crate::merge::WriteablePlainTmpFile;
 use crate::merge::WriteableTmpFile;
 use crate::tmp_dir::TmpDirWrapper;
 use crate::{
-    GlobalSettings, Line,
+    GlobalSettings, Line, SortError,
     chunks::{self, Chunk},
     compare_by, merge, print_sorted, sort_by,
 };
@@ -293,13 +293,19 @@ fn write<I: WriteableTmpFile>(
     separator: u8,
 ) -> UResult<I::Closed> {
     let mut tmp_file = I::create(file, compress_prog)?;
-    write_lines(chunk.lines(), tmp_file.as_write(), separator);
+    write_lines(chunk.lines(), tmp_file.as_write(), separator).map_err(|error| {
+        SortError::TmpWriteFailed {
+            path: tmp_file.path().to_owned(),
+            error,
+        }
+    })?;
     tmp_file.finished_writing()
 }
 
-fn write_lines<T: Write>(lines: &[Line], writer: &mut T, separator: u8) {
+fn write_lines<T: Write>(lines: &[Line], writer: &mut T, separator: u8) -> std::io::Result<()> {
     for s in lines {
-        writer.write_all(s.line).unwrap();
-        writer.write_all(&[separator]).unwrap();
+        writer.write_all(s.line)?;
+        writer.write_all(&[separator])?;
     }
+    Ok(())
 }
