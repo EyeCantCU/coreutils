@@ -14,6 +14,7 @@ env-help-ignore-signal = définir la gestion du/des signal/signaux SIG pour ne r
 env-help-default-signal = réinitialiser la gestion du/des signal/signaux SIG à l'action par défaut
 env-help-block-signal = bloquer la livraison du/des signal/signaux SIG pendant l'exécution de COMMAND
 env-help-list-signal-handling = lister les traitements de signaux modifiés par les options précédentes
+env-help-quoting-style = utiliser le style de citation MOT pour les entrées d'environnement affichées : literal, locale, shell, shell-always, shell-escape, shell-escape-always, c, c-maybe, escape, clocale
 
 # Messages d'erreur
 env-error-missing-closing-quote = aucune guillemet de fermeture dans la chaîne -S à la position { $position } pour la guillemet '{ $quote }'
