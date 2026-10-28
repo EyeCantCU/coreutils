@@ -880,3 +880,22 @@ fn test_dash_operand_reads_stdin() {
         .fails()
         .stderr_contains("invalid number of columns: '-'");
 }
+
+#[test]
+#[cfg(unix)]
+fn test_stdbuf_line_buffered_stdout() {
+    // `stdbuf -oL` requests line buffered stdout through `_STDBUF_O`: output
+    // must then be written line by line while the input is still open.
+    let mut child = new_ucmd!()
+        .args(&["-w2"])
+        .env("_STDBUF_O", "L")
+        .set_stdin(std::process::Stdio::piped())
+        .run_no_wait();
+    child.write_in("abc\n");
+    child.delay(500);
+    child
+        .kill()
+        .make_assertion()
+        .with_current_output()
+        .stdout_only("ab\nc\n");
+}
