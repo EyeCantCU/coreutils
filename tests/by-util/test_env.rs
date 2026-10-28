@@ -2287,3 +2287,19 @@ env: no terminating quote in -S string at position 18 for quote '''
             .stderr_is("env: no terminating quote in -S string at position 18 for quote '''\n");
     }
 }
+
+/// A program run with a standard output that was closed at startup gets it closed too.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_closed_stdout_stays_closed_for_command() {
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&[
+            "-c",
+            "exec >&-; \"$0\" env sh -c 'readlink /proc/$$/fd/1 >&2 2>/dev/null || echo closed >&2'",
+        ])
+        .arg(&scene.bin_path)
+        .succeeds()
+        .stderr_is("closed\n");
+}

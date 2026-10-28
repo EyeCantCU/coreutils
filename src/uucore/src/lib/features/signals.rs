@@ -831,6 +831,134 @@ pub const fn stderr_was_closed() -> bool {
     false
 }
 
+/// How much output a closed standard output absorbs before the utility is
+/// stopped: about what a pipe accepts before its writer has to wait.
+#[cfg(unix)]
+const CLOSED_STDOUT_LIMIT: u64 = 64 * 1024;
+
+/// Detects output written to a standard output that was closed at startup.
+///
+/// The Rust runtime reopens a closed standard output on `/dev/null`, and the
+/// standard library ignores `EBADF` on standard output, so writes that should
+/// fail succeed silently. While this is alive, standard output is a pipe read
+/// by a background thread: once more than [`CLOSED_STDOUT_LIMIT`] bytes have
+/// been written the process reports a write error and exits, and
+/// [`ClosedStdout::finish`] reports one if anything at all was written.
+#[cfg(unix)]
+pub struct ClosedStdout {
+    state: std::sync::Arc<std::sync::Mutex<ClosedStdoutState>>,
+    message: String,
+}
+
+#[cfg(unix)]
+struct ClosedStdoutState {
+    reader: std::io::PipeReader,
+    written: u64,
+}
+
+#[cfg(unix)]
+impl ClosedStdoutState {
+    /// Reads what is pending without blocking, stopping early once more than
+    /// `limit` bytes have been written; returns `false` at end of file.
+    fn drain(&mut self, limit: u64) -> bool {
+        use std::io::{ErrorKind, Read};
+        let mut buf = [0u8; 8192];
+        loop {
+            match self.reader.read(&mut buf) {
+                Ok(0) => return false,
+                Ok(n) => {
+                    self.written += n as u64;
+                    if self.written > limit {
+                        return true;
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => return e.kind() == ErrorKind::WouldBlock,
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl ClosedStdout {
+    /// Starts watching standard output if it was closed when the process started.
+    pub fn watch() -> Option<Self> {
+        use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
+        use std::os::fd::AsRawFd;
+        use std::sync::{Arc, Mutex, PoisonError};
+
+        if !stdout_was_closed() {
+            return None;
+        }
+        let (reader, writer) = std::io::pipe().ok()?;
+        fcntl(&reader, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).ok()?;
+        nix::unistd::dup2_stdout(&writer).ok()?;
+        drop(writer);
+        // A program executed from here starts with standard output closed, as
+        // it would have without this pipe.
+        let _ = fcntl(std::io::stdout(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC));
+
+        let message = format!(
+            "{}: {}: {}\n",
+            crate::util_name(),
+            crate::translate!("common-write-error"),
+            crate::error::strip_errno(&std::io::Error::from_raw_os_error(Errno::EBADF as i32))
+        );
+        let fd = reader.as_raw_fd();
+        let state = Arc::new(Mutex::new(ClosedStdoutState { reader, written: 0 }));
+        let thread_state = Arc::clone(&state);
+        let thread_message = message.clone();
+        std::thread::spawn(move || {
+            use nix::libc;
+            use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+            use std::os::fd::{AsFd, BorrowedFd};
+
+            loop {
+                // SAFETY: the reader lives as long as `thread_state`.
+                let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+                let mut fds = [PollFd::new(borrowed.as_fd(), PollFlags::POLLIN)];
+                if poll(&mut fds, PollTimeout::NONE).is_err_and(|e| e != Errno::EINTR) {
+                    return;
+                }
+                let mut state = thread_state.lock().unwrap_or_else(PoisonError::into_inner);
+                let open = state.drain(CLOSED_STDOUT_LIMIT);
+                if state.written > CLOSED_STDOUT_LIMIT {
+                    report_closed_stdout(&thread_message);
+                    // Holding the lock keeps `finish` from reporting a second time.
+                    // SAFETY: `_exit` only terminates the process.
+                    unsafe { libc::_exit(1) };
+                }
+                if !open {
+                    return;
+                }
+            }
+        });
+        Some(Self { state, message })
+    }
+
+    /// Reports a write error if anything was written to standard output and
+    /// returns the exit code to use instead of `code`.
+    pub fn finish(self, code: i32) -> i32 {
+        use std::io::Write;
+        use std::sync::PoisonError;
+
+        let _ = std::io::stdout().flush();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.drain(u64::MAX);
+        if state.written == 0 {
+            return code;
+        }
+        report_closed_stdout(&self.message);
+        if code == 0 { 1 } else { code }
+    }
+}
+
+#[cfg(unix)]
+fn report_closed_stdout(message: &str) {
+    use std::io::Write;
+    let _ = std::io::stderr().write_all(message.as_bytes());
+}
+
 /// Returns whether SIGPIPE was ignored at process startup.
 #[cfg(unix)]
 pub fn sigpipe_was_ignored() -> bool {

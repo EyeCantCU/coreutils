@@ -102,6 +102,12 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             "--version" | "-V" => {
+                // The runtime reopens a closed standard output on /dev/null.
+                #[cfg(all(unix, not(target_os = "fuchsia")))]
+                if uucore::signals::stdout_was_closed() {
+                    let _ = writeln!(io::stderr(), "coreutils: write error: Bad file descriptor");
+                    return ExitCode::FAILURE;
+                }
                 if let Err(e) = writeln!(io::stdout(), "coreutils {VERSION} (multi-call binary)")
                     && e.kind() != io::ErrorKind::BrokenPipe
                 {
