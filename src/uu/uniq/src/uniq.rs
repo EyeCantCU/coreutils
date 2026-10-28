@@ -867,7 +867,12 @@ fn open_input_file(in_file_name: Option<&OsStr>) -> UResult<Box<dyn BufRead>> {
             let in_file = File::open(path).map_err_context(|| path.maybe_quote().to_string())?;
             Box::new(BufReader::with_capacity(OUTPUT_BUFFER_CAPACITY, in_file))
         }
-        _ => Box::new(stdin().lock()),
+        _ => {
+            #[cfg(all(unix, not(target_os = "fuchsia")))]
+            uucore::signals::ensure_stdin_open()
+                .map_err_context(|| translate!("uniq-error-read-error"))?;
+            Box::new(stdin().lock())
+        }
     })
 }
 

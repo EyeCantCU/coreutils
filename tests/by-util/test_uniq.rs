@@ -1351,3 +1351,18 @@ fn test_obsolete_skip_fields_not_read_after_double_dash() {
         .fails()
         .stderr_contains("-1");
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = uutests::util::TestScenario::new(uutests::util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" uniq -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("uniq: read error: Bad file descriptor\n");
+}
