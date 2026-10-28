@@ -480,10 +480,17 @@ fn show_zero_multiplier_warning() {
 }
 
 /// Parse bytes using [`str::parse`], then map error if needed.
-fn parse_bytes_only(s: &str, i: usize) -> Result<u64, ParseError> {
-    s[..i]
-        .parse()
-        .map_err(|_| ParseError::MultiplierStringParseFailure(s.to_string()))
+fn parse_bytes_only(full: &str, s: &str, i: usize) -> Result<u64, ParseError> {
+    s[..i].parse().map_err(|e: std::num::ParseIntError| {
+        if *e.kind() == std::num::IntErrorKind::PosOverflow {
+            ParseError::InvalidNumberWithErrMsg(
+                full.to_string(),
+                "Value too large for defined data type".to_string(),
+            )
+        } else {
+            ParseError::MultiplierStringParseFailure(s.to_string())
+        }
+    })
 }
 
 /// Parse a number of bytes from the given string, assuming no `'x'` characters.
@@ -528,9 +535,9 @@ fn parse_bytes_no_x(full: &str, s: &str) -> Result<u64, ParseError> {
             }
             Err(_) => return Err(ParseError::InvalidNumber(full.to_string())),
         },
-        (Some(i), None, None) => (parse_bytes_only(s, i)?, 1),
-        (None, Some(i), None) => (parse_bytes_only(s, i)?, 2),
-        (None, None, Some(i)) => (parse_bytes_only(s, i)?, 512),
+        (Some(i), None, None) => (parse_bytes_only(full, s, i)?, 1),
+        (None, Some(i), None) => (parse_bytes_only(full, s, i)?, 2),
+        (None, None, Some(i)) => (parse_bytes_only(full, s, i)?, 512),
         _ => return Err(ParseError::MultiplierStringParseFailure(full.to_string())),
     };
     num.checked_mul(multiplier)
@@ -559,15 +566,42 @@ pub fn parse_bytes_with_opt_multiplier(s: &str) -> Result<u64, ParseError> {
     if parts.len() == 1 {
         parse_bytes_no_x(s, parts[0])
     } else {
-        let mut total: u64 = 1;
+        // A zero factor makes the product zero even if another factor is too
+        // large, so overflows are only reported once every factor is parsed.
+        let mut total: Option<u64> = Some(1);
+        let mut overflow = None;
+        let mut has_zero = false;
+        let mut warn_zero = false;
         for (i, part) in parts.iter().enumerate() {
             if *part == "0" && i != parts.len() - 1 {
-                show_zero_multiplier_warning();
+                warn_zero = true;
             }
-            let num = parse_bytes_no_x(s, part)?;
-            total = total
-                .checked_mul(num)
-                .ok_or_else(|| ParseError::InvalidNumber(s.to_string()))?;
+            match parse_bytes_no_x(s, part) {
+                Ok(0) => has_zero = true,
+                Ok(num) => total = total.and_then(|t| t.checked_mul(num)),
+                Err(
+                    e @ (ParseError::InvalidNumberWithErrMsg(..)
+                    | ParseError::MultiplierStringOverflow(_)),
+                ) => {
+                    overflow.get_or_insert(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let total = if has_zero {
+            0
+        } else if let Some(e) = overflow {
+            return Err(e);
+        } else {
+            total.ok_or_else(|| {
+                ParseError::InvalidNumberWithErrMsg(
+                    s.to_string(),
+                    "Value too large for defined data type".to_string(),
+                )
+            })?
+        };
+        if warn_zero {
+            show_zero_multiplier_warning();
         }
         Ok(total)
     }
