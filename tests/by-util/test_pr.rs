@@ -79,7 +79,7 @@ fn test_number_lines_empty_value_is_rejected() {
     new_ucmd!()
         .args(&["--number-lines=", "test_one_page.log"])
         .fails_with_code(1)
-        .stderr_contains("pr: '-n' extra characters or invalid number in the argument");
+        .stderr_is("pr: '-n': Invalid argument: ''\nTry 'pr --help' for more information.\n");
 }
 
 #[test]
@@ -113,7 +113,7 @@ fn test_with_numbering_option_with_number_width() {
     let mut scenario = new_ucmd!();
     let value = file_last_modified_time(&scenario, test_file_path);
     scenario
-        .args(&["-n", "2", test_file_path])
+        .args(&["-n2", test_file_path])
         .succeeds()
         .stdout_is_templated_fixture(expected_test_file_path, &[("{last_modified_time}", &value)]);
 }
@@ -210,7 +210,7 @@ fn test_with_valid_page_ranges() {
     scenario
         .args(&["--pages=20:5", test_file_path])
         .fails()
-        .stderr_only("pr: invalid --pages argument '20:5'\n");
+        .stderr_only("pr: invalid page range '20:5'\n");
     new_ucmd!()
         .args(&["--pages=1:5", test_file_path])
         .succeeds();
@@ -226,7 +226,7 @@ fn test_with_valid_page_ranges() {
     new_ucmd!()
         .args(&["--pages=5:1", test_file_path])
         .fails()
-        .stderr_only("pr: invalid --pages argument '5:1'\n");
+        .stderr_only("pr: invalid page range '5:1'\n");
 }
 
 #[test]
@@ -299,9 +299,9 @@ fn test_with_suppress_error_option() {
     let test_file_path = "test_num_page.log";
     let mut scenario = new_ucmd!();
     scenario
-        .args(&["--pages=20:5", "-r", test_file_path])
-        .fails()
-        .no_output();
+        .args(&["-r", test_file_path, "does-not-exist"])
+        .fails_with_code(1)
+        .no_stderr();
 }
 
 #[test]
@@ -486,7 +486,7 @@ fn test_page_length_too_large() {
 fn test_number_width_too_large() {
     let arg = "18446744073709551615";
     new_ucmd!()
-        .args(&["-n", arg])
+        .arg(format!("-n{arg}"))
         .fails_with_code(1)
         .stderr_is(format!(
             "pr: '-n' extra characters or invalid number in the argument: '{arg}': Value too large for defined data type\nTry 'pr --help' for more information.\n"
@@ -541,7 +541,7 @@ fn test_large_number_width_does_not_panic() {
     // With -t (no page headers/footers) GNU emits no page padding, so the
     // output is exactly the numbered line.
     new_ucmd!()
-        .args(&["-t", "-n", "70000"])
+        .args(&["-t", "-n70000"])
         .pipe_in("x\n")
         .succeeds()
         .stdout_is(format!("{}1\tx\n", " ".repeat(69999)));
@@ -581,7 +581,9 @@ fn test_offset_invalid() {
     new_ucmd!()
         .args(&["--indent=-5"])
         .fails_with_code(1)
-        .stderr_is("pr: '-o MARGIN' invalid line offset: '-5'\n");
+        .stderr_is(
+            "pr: '-o MARGIN' invalid line offset: '-5': Value too large for defined data type\n",
+        );
 
     new_ucmd!()
         .args(&["-o", "abc"])
@@ -703,15 +705,15 @@ fn test_join_lines_keeps_column_separator() {
 
 #[test]
 fn test_value_for_number_lines() {
-    // *5 is of the form [SEP[NUMBER]] so is accepted and succeeds
-    new_ucmd!().args(&["-n", "*5", "test.log"]).succeeds();
+    // The value of -n has to be attached to it.
+    new_ucmd!().args(&["-n*5", "test.log"]).succeeds();
+    new_ucmd!().args(&["-na", "test.log"]).succeeds();
 
-    // a is of the form [SEP[NUMBER]] so is accepted and succeeds
-    new_ucmd!().args(&["-n", "a", "test.log"]).succeeds();
-
-    // foo5.txt is of not the form [SEP[NUMBER]] so is not used as value.
-    // Therefore, pr tries to access the file, which does not exist.
-    new_ucmd!().args(&["-n", "foo5.txt", "test.log"]).fails();
+    // A separate argument is a file operand.
+    new_ucmd!()
+        .args(&["-n", "*5", "test.log"])
+        .fails_with_code(1)
+        .stderr_is("pr: '*5': No such file or directory\n");
 }
 
 #[test]
@@ -883,12 +885,8 @@ fn test_columns() {
     let whitespace = " ".repeat(50);
     let datetime_pattern = r"\d\d\d\d-\d\d-\d\d \d\d:\d\d";
     let header = format!("\n\n{datetime_pattern}{whitespace}Page 1\n\n\n");
-    // TODO Our output still does not match the behavior of GNU
-    // pr. The correct output should be:
-    //
-    //     "a\t\t\t\t    b\n";
-    //
-    let data = "a                                  \tb                                  \n";
+    // Multi-column output pads with tabs where it can.
+    let data = "a\t\t\t\t    b\n";
     let blank_lines_60 = "\n".repeat(60);
     let pattern = format!("{header}{data}{blank_lines_60}");
     let regex = Regex::new(&pattern).unwrap();
@@ -912,7 +910,7 @@ fn test_columns_partly_filled_page() {
         .args(&["-t", "-2", "-w", "20"])
         .pipe_in("a\nb\nc\n")
         .succeeds()
-        .stdout_is("a        \tc        \nb        \n");
+        .stdout_is("a\t  c\nb\n");
 }
 
 #[test]
@@ -924,7 +922,7 @@ fn test_columns_partly_filled_page_across() {
         .args(&["-t", "-a", "-2", "-w", "20"])
         .pipe_in("a\nb\nc\n")
         .succeeds()
-        .stdout_is("a        \tb        \nc        \n");
+        .stdout_is("a\t  b\nc\n");
 }
 
 #[test]
@@ -936,14 +934,14 @@ fn test_columns_fewer_lines_than_columns() {
         .args(&["-t", "-3", "-w", "20"])
         .pipe_in("a\n")
         .succeeds()
-        .stdout_is("a     \n");
+        .stdout_is("a\n");
 
     // Command line: `printf "a\nb\n" | pr -t -3 -w 20`.
     new_ucmd!()
         .args(&["-t", "-3", "-w", "20"])
         .pipe_in("a\nb\n")
         .succeeds()
-        .stdout_is("a     \tb     \n");
+        .stdout_is("a      b\n");
 }
 
 #[test]
@@ -954,9 +952,9 @@ fn test_columns_last_page() {
     // Command line: `seq 9 | pr -2 -l 12 -w 20 -D DATE`.
     let header = "\n\nDATE          Page ";
     let expected = format!(
-        "{header}1\n\n\n1        \t3        \n2        \t4        \n{blank}\
-         {header}2\n\n\n5        \t7        \n6        \t8        \n{blank}\
-         {header}3\n\n\n9        \n\n\n\n\n\n\n",
+        "{header}1\n\n\n1\t  3\n2\t  4\n{blank}\
+         {header}2\n\n\n5\t  7\n6\t  8\n{blank}\
+         {header}3\n\n\n9\n\n\n\n\n\n\n",
         blank = "\n".repeat(5),
     );
     new_ucmd!()
@@ -976,17 +974,9 @@ fn test_merge() {
     let whitespace = " ".repeat(50);
     let datetime_pattern = r"\d\d\d\d-\d\d-\d\d \d\d:\d\d";
     let header = format!("\n\n{datetime_pattern}{whitespace}Page 1\n\n\n");
-    // TODO Our output still does not match the behavior of GNU
-    // pr. The correct output should be:
-    //
-    //     "a\t\t\t\t    b\n";
-    //
-    // and the blank lines should actually be empty lines.
-    let data = "a                                  \tb                                  \n";
-    let blank_lines_55 =
-        "                                   \t                                   \n".repeat(55);
-    let footer = "\n".repeat(5);
-    let pattern = format!("{header}{data}{blank_lines_55}{footer}");
+    let data = "a\t\t\t\t    b\n";
+    let blank_lines_60 = "\n".repeat(60);
+    let pattern = format!("{header}{data}{blank_lines_60}");
     let regex = Regex::new(&pattern).unwrap();
 
     // Command line: `(echo "a" > f; echo "b" > g; pr -m f g)`.
@@ -1007,13 +997,13 @@ fn test_merge_one_long_one_short() {
     let whitespace = " ".repeat(50);
     let datetime_pattern = r"\d\d\d\d-\d\d-\d\d \d\d:\d\d";
     let header = format!("\n\n{datetime_pattern}{whitespace}Page 1\n\n\n");
-    let data = "a                                  \tb                                  \n";
+    let data = "a\t\t\t\t    b\n";
     let footer = "\n".repeat(5);
     let page1 = format!("{header}{data}{footer}");
 
     // Page 2 should have just the second line of `f`.
     let header = format!("\n\n{datetime_pattern}{whitespace}Page 2\n\n\n");
-    let data = "a                                  \t                                   \n";
+    let data = "a\t\t\t\t    \n";
     let page2 = format!("{header}{data}{footer}");
 
     let pattern = format!("{page1}{page2}");
@@ -1055,8 +1045,8 @@ fn test_expand_tab_at_end_of_short_flag_cluster() {
     for (arg, expected) in [
         ("-tre", "oi\n"),
         ("-tre8", "oi\n"),
-        ("-tfre", "oi\n\x0c"),
-        ("-tfre8", "oi\n\x0c"),
+        ("-tfre", "oi\n"),
+        ("-tfre8", "oi\n"),
     ] {
         new_ucmd!()
             .arg(arg)
@@ -1165,7 +1155,9 @@ fn test_invalid_expand_tab_arguments() {
         new_ucmd!()
             .args(&[arg, test_file_path])
             .fails()
-            .stderr_contains(format!("pr: '-e' extra characters or invalid number in the argument: ‘{error_msg_field}’\nTry 'pr --help' for more information."));
+            .stderr_contains(format!(
+                "pr: '-e' extra characters or invalid number in the argument: '{error_msg_field}'"
+            ));
     }
 }
 // spell-checker:enable
@@ -1183,7 +1175,7 @@ fn test_zero_columns() {
     new_ucmd!()
         .arg("--columns=0")
         .fails_with_code(1)
-        .stderr_contains("pr: invalid --columns argument '0'");
+        .stderr_is("pr: invalid number of columns: '0': Numerical result out of range\n");
 }
 
 #[test]
@@ -1191,7 +1183,7 @@ fn test_zero_columns_shortcut() {
     new_ucmd!()
         .arg("-0")
         .fails_with_code(1)
-        .stderr_contains("pr: invalid --columns argument '0'");
+        .stderr_is("pr: invalid number of columns: '0': Numerical result out of range\n");
 }
 
 #[test]
@@ -1248,7 +1240,7 @@ fn test_double_dash_shields_filename_ending_with_dash_zero() {
 
 #[test]
 fn test_zero_expand_tab_width() {
-    let expected = "pr: '-e' extra characters or invalid number in the argument: ‘0’\nTry 'pr --help' for more information.\n";
+    let expected = "pr: '-e' extra characters or invalid number in the argument: '0'\nTry 'pr --help' for more information.\n";
     new_ucmd!()
         .arg("-e0")
         .fails_with_code(1)
@@ -1261,18 +1253,16 @@ fn test_zero_expand_tab_width() {
 
 #[test]
 fn test_zero_column_width() {
-    new_ucmd!()
-        .args(&["-w", "0"])
-        .fails_with_code(1)
-        .stderr_is("pr: invalid --width argument '0'\n");
+    new_ucmd!().args(&["-w", "0"]).fails_with_code(1).stderr_is(
+        "pr: '-w PAGE_WIDTH' invalid number of characters: '0': Numerical result out of range\n",
+    );
 }
 
 #[test]
 fn test_zero_page_width() {
-    new_ucmd!()
-        .args(&["-W", "0"])
-        .fails_with_code(1)
-        .stderr_is("pr: invalid --page-width argument '0'\n");
+    new_ucmd!().args(&["-W", "0"]).fails_with_code(1).stderr_is(
+        "pr: '-W PAGE_WIDTH' invalid number of characters: '0': Numerical result out of range\n",
+    );
 }
 
 #[test]
@@ -1305,10 +1295,9 @@ fn test_page_length_eleven_keeps_header() {
 
 #[test]
 fn test_zero_length() {
-    new_ucmd!()
-        .args(&["-l", "0"])
-        .fails_with_code(1)
-        .stderr_is("pr: invalid --length argument '0'\n");
+    new_ucmd!().args(&["-l", "0"]).fails_with_code(1).stderr_is(
+        "pr: '-l PAGE_LENGTH' invalid number of lines: '0': Numerical result out of range\n",
+    );
 }
 
 #[test]
@@ -1316,7 +1305,7 @@ fn test_zero_pages() {
     new_ucmd!()
         .args(&["--pages", "0"])
         .fails_with_code(1)
-        .stderr_is("pr: invalid --pages argument '0'\n");
+        .stderr_is("pr: invalid page range '0'\n");
 }
 
 #[test]
@@ -1351,4 +1340,187 @@ fn test_missing_file_error_message() {
         .fails_with_code(1)
         .stderr_contains("pr: nonexistent_file: ")
         .stderr_does_not_contain("(os error");
+}
+
+#[test]
+fn test_zero_widths_are_out_of_range() {
+    for opt in ["-w", "-W"] {
+        new_ucmd!()
+            .arg(format!("{opt}0"))
+            .fails_with_code(1)
+            .stderr_only(format!(
+                "pr: '{opt} PAGE_WIDTH' invalid number of characters: '0': Numerical result out of range\n"
+            ));
+    }
+}
+
+#[test]
+fn test_expand_tabs_invalid_width_after_char() {
+    // `=` is taken as the input tab character, leaving `-1` as the width.
+    new_ucmd!().arg("-e=-1").fails_with_code(1).stderr_only(
+        "pr: '-e' extra characters or invalid number in the argument: '-1'\n\
+             Try 'pr --help' for more information.\n",
+    );
+}
+
+#[test]
+fn test_expand_tabs_position_overflow() {
+    new_ucmd!()
+        .args(&["-t", "-e2147483647"])
+        .pipe_in("\t\t\n")
+        .set_stdout(std::process::Stdio::null())
+        .fails_with_code(1)
+        .stderr_is("pr: integer overflow\n");
+}
+
+#[test]
+fn test_page_range_errors() {
+    for (arg, msg) in [
+        ("--pages=0", "invalid page range '0'"),
+        ("--pages=-0", "invalid --pages argument '-0'"),
+        ("--pages=9x", "invalid page range '9x'"),
+        ("--pages=1:2x", "invalid suffix in --pages argument '1:2x'"),
+        (
+            "--pages=18446744073709551616",
+            "--pages argument '18446744073709551616' too large",
+        ),
+        ("+a1", "invalid + argument 'a1'"),
+    ] {
+        new_ucmd!()
+            .arg(arg)
+            .fails_with_code(1)
+            .stderr_only(format!("pr: {msg}\n"));
+    }
+}
+
+#[test]
+fn test_invalid_plus_page_range_is_a_file() {
+    for arg in ["+0", "+0foo"] {
+        new_ucmd!()
+            .arg(arg)
+            .fails_with_code(1)
+            .stderr_only(format!("pr: {arg}: No such file or directory\n"));
+    }
+}
+
+#[test]
+fn test_columns_expand_and_restore_tabs() {
+    new_ucmd!()
+        .args(&["-t", "-2"])
+        .pipe_in("x\tx\tx\tx\tx\nx\tx\tx\tx\tx\n")
+        .succeeds()
+        .stdout_only("x\tx\tx\tx\tx   x\t    x\t    x\t    x\t    x\n");
+}
+
+#[test]
+fn test_columns_joined_with_tab_keep_input_tabs() {
+    for sep in ["-s", "-s\t"] {
+        new_ucmd!()
+            .args(&["-t", "-2", sep])
+            .pipe_in("x\tx\tx\tx\tx\nx\tx\tx\tx\tx\n")
+            .succeeds()
+            .stdout_only("x\tx\tx\tx\tx\tx\tx\tx\tx\tx\n");
+    }
+}
+
+#[test]
+fn test_merge_with_tab_string_separator() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.write("a", "a\n");
+    at.write("b", "a\n");
+    ucmd.args(&["-m", "-S\t\t\t", "-t", "a", "b"])
+        .succeeds()
+        .stdout_only("a\t\t\t\t  \t\t\ta\n");
+}
+
+#[test]
+fn test_output_tabs_with_margin_and_numbers() {
+    new_ucmd!()
+        .args(&["-tn", "-i5", "-o9"])
+        .pipe_in("a        b\n")
+        .succeeds()
+        .stdout_only("\t\t   1\ta\t    b\n");
+}
+
+#[test]
+fn test_full_page_followed_by_form_feed_has_no_empty_page() {
+    new_ucmd!()
+        .args(&["-t", "-l3"])
+        .pipe_in("a\nb\nc\n\x0cd\n")
+        .succeeds()
+        .stdout_only("a\nb\nc\nd\n");
+    new_ucmd!()
+        .args(&["-t", "-l3"])
+        .pipe_in("a\nb\nc\x0cd\n")
+        .succeeds()
+        .stdout_only("a\nb\nc\n\x0cd\n");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[cfg_attr(
+    wasi_runner,
+    ignore = "WASI: wasmtime itself needs more memory than the guest's rlimit allows"
+)]
+fn test_long_line_is_streamed_under_memory_limit() {
+    use rlimit::Resource;
+    use std::process::Stdio;
+
+    const AS_LIMIT: u64 = 200 * 1024 * 1024;
+
+    // A single line larger than the limit must not be held in memory.
+    new_ucmd!()
+        .limit(Resource::AS, AS_LIMIT, AS_LIMIT)
+        .set_stdout(Stdio::null())
+        .pipe_in(vec![b'x'; 210 * 1024 * 1024])
+        .succeeds();
+}
+
+#[test]
+#[cfg(unix)]
+fn test_stdbuf_line_buffered_stdout() {
+    // `stdbuf -oL` requests line buffered stdout through `_STDBUF_O`: each
+    // line must be written as soon as it has been read, while the input is
+    // still open.
+    let mut child = new_ucmd!()
+        .env("_STDBUF_O", "L")
+        .args(&["-t", "-n"])
+        .set_stdin(std::process::Stdio::piped())
+        .run_no_wait();
+    child.write_in("1\n");
+    child.delay(500);
+    child
+        .kill()
+        .make_assertion()
+        .with_current_output()
+        .stdout_only("    1\t1\n");
+}
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF, even with -r. Run through a
+    // shell so the process really starts with fd 0 closed.
+    for args in ["pr -", "pr -r -"] {
+        let scene = uutests::util::TestScenario::new(uutests::util_name!());
+        scene
+            .cmd("sh")
+            .args(&["-c", &format!("exec <&-; \"$0\" {args}")])
+            .arg(&scene.bin_path)
+            .fails_with_code(1)
+            .no_stdout()
+            .stderr_is("pr: 'standard input': Bad file descriptor\n");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn test_stdin_read_error_names_standard_input() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.mkdir("d");
+    ucmd.args(&["-t", "-"])
+        .set_stdin(std::fs::File::open(at.plus("d")).unwrap())
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("pr: 'standard input': Is a directory\n");
 }

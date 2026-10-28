@@ -85,7 +85,13 @@ pr-help-join-lines =
   merge full lines, turns off -W line truncation, no column
                   alignment, --sep-string[=STRING] sets separators
 pr-help-expand-tabs = expand input CHARs (TABs) to tab WIDTH (8)
+pr-help-output-tabs = replace spaces with CHARs (TABs) to tab WIDTH (8)
+pr-help-show-control-chars = use hat notation (^G) and octal backslash notation
+pr-help-show-nonprinting = use octal backslash notation
 pr-help-help = Print help information
+
+# Name of standard input in error messages
+pr-standard-input = standard input
 
 # Page header text
 pr-page = Page
@@ -100,7 +106,19 @@ pr-error-socket-not-supported = pr: cannot open {$file}, Operation not supported
 pr-error-no-such-file = pr: cannot open {$file}, No such file or directory
 pr-error-column-merge-conflict = cannot specify number of columns when printing in parallel
 pr-error-across-merge-conflict = cannot specify both printing across and printing in parallel
-pr-error-invalid-pages-range = invalid --pages argument '{$start}:{$end}'
 pr-error-starting-page-exceeds-page-count = starting page number {$start} exceeds page count {$count}
-pr-error-invalid-expand-tab-argument ='-e' extra characters or invalid number in the argument: ‘{$arg}’
-pr-error-invalid-number-argument ='-n' extra characters or invalid number in the argument: ‘{$arg}’
+pr-error-invalid-char-width-argument = '-{$option}' extra characters or invalid number in the argument: {$arg}
+pr-error-empty-argument = '-{$option}': Invalid argument: ''
+pr-error-invalid-pages-argument = invalid {$option} argument {$arg}
+pr-error-invalid-page-range = invalid page range {$arg}
+pr-error-invalid-pages-suffix = invalid suffix in {$option} argument {$arg}
+pr-error-pages-too-large = {$option} argument {$arg} too large
+pr-error-invalid-columns = invalid number of columns
+pr-error-invalid-page-length = '-l PAGE_LENGTH' invalid number of lines
+pr-error-invalid-page-width = '-{$option} PAGE_WIDTH' invalid number of characters
+pr-error-invalid-first-line-number = '-N NUMBER' invalid starting line number
+pr-error-invalid-indent = '-o MARGIN' invalid line offset
+pr-error-out-of-range = Numerical result out of range
+pr-error-value-too-large = Value too large for defined data type
+pr-error-page-width-too-narrow = page width too narrow
+pr-error-integer-overflow = integer overflow
