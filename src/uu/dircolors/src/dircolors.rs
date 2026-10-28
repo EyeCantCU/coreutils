@@ -10,13 +10,13 @@ use std::env;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write, stdout};
+use std::io::{self, BufRead, BufReader, Write, stdout};
 use std::path::Path;
 
 use clap::{Arg, ArgAction, Command};
 use uucore::colors::{FILE_ATTRIBUTE_CODES, FILE_COLORS, FILE_TYPES, TERMS};
 use uucore::display::Quotable;
-use uucore::error::{UResult, USimpleError, UUsageError};
+use uucore::error::{UError, UResult, USimpleError, UUsageError, strip_errno};
 use uucore::translate;
 
 use uucore::{format_usage, parser::parse_glob};
@@ -111,7 +111,7 @@ fn generate_ls_colors(fmt: &OutputFmt, sep: &str) -> String {
     }
 }
 
-#[uucore::main(no_signals)]
+#[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
 
@@ -174,12 +174,16 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         )),
         [file_arg] => {
             let result = if *file_arg == "-" {
-                let fin = BufReader::new(std::io::stdin());
+                #[cfg(all(unix, not(target_os = "fuchsia")))]
+                uucore::signals::ensure_stdin_open().map_err(|e| read_error("-", &e))?;
+                let fin = BufReader::new(io::stdin());
                 // For example, for echo "owt 40;33"|dircolors -b -
-                parse(fin.lines().map_while(Result::ok), &out_format, "-")
+                parse_reader(fin, &out_format, "-")?
             } else {
                 let path = Path::new(&file_arg);
-                if path.is_dir() {
+                // Reading a directory fails with EISDIR on Linux, so let the
+                // read report it (or any other read error) there.
+                if cfg!(not(any(target_os = "linux", target_os = "android"))) && path.is_dir() {
                     return Err(USimpleError::new(
                         2,
                         translate!("dircolors-error-expected-file-got-directory", "path" => path.quote()),
@@ -188,11 +192,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                 let file = File::open(path)
                     .map_err(|e| USimpleError::new(1, format!("{}: {e}", path.maybe_quote())))?;
                 let fin = BufReader::new(file);
-                parse(
-                    fin.lines().map_while(Result::ok),
-                    &out_format,
-                    &path.to_string_lossy(),
-                )
+                parse_reader(fin, &out_format, &path.to_string_lossy())?
             };
 
             let string = result.map_err(|s| USimpleError::new(1, s))?;
@@ -311,6 +311,36 @@ enum ParseState {
     Matched,
     Continue,
     Pass,
+}
+
+fn read_error(fp: &str, e: &io::Error) -> Box<dyn UError> {
+    USimpleError::new(
+        1,
+        translate!("dircolors-error-read", "file" => fp.maybe_quote(), "error" => strip_errno(e)),
+    )
+}
+
+/// Parses the lines of `reader`, reporting a read error instead of stopping
+/// silently. Invalid UTF-8 still just ends the input.
+fn parse_reader<R: BufRead>(
+    reader: R,
+    fmt: &OutputFmt,
+    fp: &str,
+) -> UResult<Result<String, String>> {
+    let mut error = None;
+    let lines = reader.lines().map_while(|line| {
+        line.map_err(|e| {
+            if e.kind() != io::ErrorKind::InvalidData {
+                error = Some(e);
+            }
+        })
+        .ok()
+    });
+    let result = parse(lines, fmt, fp);
+    match error {
+        Some(e) => Err(read_error(fp, &e)),
+        None => Ok(result),
+    }
 }
 
 fn parse<T>(user_input: T, fmt: &OutputFmt, fp: &str) -> Result<String, String>
