@@ -5363,6 +5363,77 @@ fn test_debug_flag_with_inotify() {
 #[test]
 #[cfg(target_os = "linux")]
 #[cfg_attr(wasi_runner, ignore = "WASI: tail follow mode disabled")]
+fn test_debug_flag_follow_mode() {
+    let ts = TestScenario::new(util_name!());
+    let at = &ts.fixtures;
+    at.touch("f");
+
+    for (args, expected) in [
+        (&["-f", "/dev/null"][..], "tail: using blocking mode\n"),
+        (&["-F", "/dev/null"][..], "tail: using polling mode\n"),
+        (&["-f", "f", "/dev/null"][..], "tail: using polling mode\n"),
+        (
+            &["-f", "--pid=1", "/dev/null"][..],
+            "tail: using polling mode\n",
+        ),
+        // The mode is reported after the initial output and errors.
+        (
+            &["-F", "f", "missing"][..],
+            "tail: cannot open 'missing' for reading: No such file or directory\n\
+             tail: using notification mode\n",
+        ),
+        (
+            &["-f", "f", "missing"][..],
+            "tail: cannot open 'missing' for reading: No such file or directory\n\
+             tail: using polling mode\n",
+        ),
+    ] {
+        let mut child = ts.ucmd().arg("--debug").args(args).run_no_wait();
+        child.make_assertion_with_delay(500).is_alive();
+        child
+            .kill()
+            .make_assertion()
+            .with_all_output()
+            .stderr_is(expected);
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(wasi_runner, ignore = "WASI: tail follow mode disabled")]
+fn test_debug_flag_reverting_to_polling() {
+    let ts = TestScenario::new(util_name!());
+    let at = &ts.fixtures;
+    at.mkdir("dir");
+    at.touch("dir/file");
+
+    let mut child = ts
+        .ucmd()
+        .args(&[
+            "--debug",
+            "-s.1",
+            "--max-unchanged-stats=1",
+            "-F",
+            "dir/file",
+        ])
+        .run_no_wait();
+    child.delay(500);
+    at.remove("dir/file");
+    at.rmdir("dir");
+    child.delay(500);
+    child.make_assertion().is_alive();
+    child
+        .kill()
+        .make_assertion()
+        .with_all_output()
+        .stderr_contains(
+            "tail: inotify cannot be used, reverting to polling\ntail: using polling mode\n",
+        );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(wasi_runner, ignore = "WASI: tail follow mode disabled")]
 fn test_follow_dangling_symlink() {
     let (at, mut ucmd) = at_and_ucmd!();
     at.symlink_file("target", "link");

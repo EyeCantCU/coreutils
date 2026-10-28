@@ -65,15 +65,6 @@ fn uu_tail(settings: &Settings) -> UResult<()> {
 
     observer.start(settings)?;
 
-    // Print debug info about the follow implementation being used
-    if settings.debug && settings.follow.is_some() {
-        if observer.use_polling {
-            show_error!("{}", translate!("tail-debug-using-polling-mode"));
-        } else {
-            show_error!("{}", translate!("tail-debug-using-notification-mode"));
-        }
-    }
-
     // Do an initial tail print of each path's content.
     // Add `path` and `reader` to `files` map if `--follow` is selected.
     for input in &settings.inputs {
@@ -103,11 +94,74 @@ fn uu_tail(settings: &Settings) -> UResult<()> {
         not the -f option shall be ignored.
         */
         if !settings.has_only_stdin() || settings.pid.is_some_and(|pid| pid != 0) {
+            // Report the follow implementation once the initial output is done.
+            if settings.debug {
+                show_error!("{}", follow_mode_message(settings, &observer));
+            }
             follow::follow(observer, settings)?;
         }
     }
 
     Ok(())
+}
+
+/// The `--debug` description of how the inputs are followed.
+///
+/// A single device followed by descriptor without `--pid` is read with
+/// blocking reads. Change notification needs a regular file or a FIFO behind
+/// a name; anything else (a device, standard input that is not a pipe, or,
+/// when following by descriptor, a name that could not be opened) means the
+/// inputs are polled.
+fn follow_mode_message(settings: &Settings, observer: &Observer) -> String {
+    #[cfg(unix)]
+    use std::os::unix::fs::FileTypeExt;
+
+    #[derive(PartialEq)]
+    enum Kind {
+        Watchable,
+        Device,
+        Other,
+    }
+    let kinds: Vec<Kind> = settings
+        .inputs
+        .iter()
+        .filter_map(|input| {
+            let path = match input.kind() {
+                InputKind::Stdin => Path::new(text::DEV_STDIN),
+                InputKind::File(path) => path.as_path(),
+            };
+            let Ok(ft) = path.metadata().map(|md| md.file_type()) else {
+                return Some(Kind::Other);
+            };
+            #[cfg(unix)]
+            let is_fifo = ft.is_fifo();
+            #[cfg(not(unix))]
+            let is_fifo = false;
+            if input.is_stdin() {
+                // A piped standard input is not followed at all.
+                return (!is_fifo).then_some(Kind::Device);
+            }
+            Some(if ft.is_file() || is_fifo {
+                Kind::Watchable
+            } else if ft.is_dir() {
+                Kind::Other
+            } else {
+                Kind::Device
+            })
+        })
+        .collect();
+
+    if observer.follow_descriptor() && observer.pid == 0 && kinds == [Kind::Device] {
+        translate!("tail-debug-using-blocking-mode")
+    } else if observer.use_polling
+        || kinds.contains(&Kind::Device)
+        || !kinds.contains(&Kind::Watchable)
+        || (observer.follow_descriptor() && kinds.contains(&Kind::Other))
+    {
+        translate!("tail-debug-using-polling-mode")
+    } else {
+        translate!("tail-debug-using-notification-mode")
+    }
 }
 
 fn tail_file(
