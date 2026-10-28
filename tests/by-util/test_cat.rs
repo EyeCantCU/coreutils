@@ -1014,3 +1014,13 @@ fn test_closed_stdin() {
         .stdout_is("content\n")
         .stderr_is("cat: -: Bad file descriptor\n");
 }
+
+#[test]
+#[cfg(all(target_os = "linux", not(wasi_runner)))]
+fn test_read_error() {
+    new_ucmd!()
+        .arg("/proc/self/mem")
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("cat: /proc/self/mem: Input/output error\n");
+}
