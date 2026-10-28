@@ -26,6 +26,7 @@ fmt-error-first-option-width = invalid option -- {$option}; -WIDTH is recognized
   option; use -w N instead
   Try 'fmt --help' for more information.
 fmt-error-read = read error
+fmt-error-reading = error reading {$file}
 fmt-error-invalid-width-malformed = invalid width: {$width}
 fmt-error-cannot-open-for-reading = cannot open {$file} for reading
 fmt-error-cannot-get-metadata = cannot get metadata for {$file}
