@@ -4208,6 +4208,101 @@ fn test_when_argument_files_are_triple_combinations_of_fifo_pipe_and_regular_fil
         .stdout_only(expected);
 }
 
+/// A followed name that is rotated away must not keep its file watched:
+/// with inotify, the watch on the file is removed once the name stops
+/// referring to it, and a new one is added when the name comes back.
+/// `strace` runs without `-f`, so this also checks that tail makes these
+/// calls from its main thread.
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(wasi_runner, ignore = "WASI: tail follow mode disabled")]
+fn test_follow_name_rotation_removes_file_watch() {
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    if !Command::new("strace")
+        .args(["-o", "/dev/null", "true"])
+        .status()
+        .is_ok_and(|s| s.success())
+    {
+        return; // strace is missing or cannot trace here
+    }
+
+    let ts = TestScenario::new(util_name!());
+    let at = &ts.fixtures;
+    at.write("k", "first\n");
+
+    let file_watches = || {
+        std::fs::read_to_string(at.plus("strace.out"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| {
+                l.starts_with("inotify_add_watch(") && l.contains("/k\"") && l.contains("IN_MODIFY")
+            })
+            .count()
+    };
+    let removals = || {
+        std::fs::read_to_string(at.plus("strace.out"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.starts_with("inotify_rm_watch("))
+            .count()
+    };
+    let wait_for = |what: &str, done: &dyn Fn() -> bool| {
+        let start = Instant::now();
+        while !done() {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "timed out: {what}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+
+    // tail stops following once this process is gone.
+    let mut sleeper = Command::new("sleep").arg("60").spawn().unwrap();
+    let pid_arg = format!("--pid={}", sleeper.id());
+    let child = ts
+        .cmd("strace")
+        .args(&[
+            "-o",
+            "strace.out",
+            "-e",
+            "trace=inotify_add_watch,inotify_rm_watch",
+            uutests::util::get_tests_binary(),
+            ts.util_name.as_str(),
+            "-F",
+            "-s.1",
+            "--max-unchanged-stats=1",
+            &pid_arg,
+            "k",
+        ])
+        .run_no_wait();
+
+    wait_for("watch on the file", &|| file_watches() == 1);
+    assert_eq!(removals(), 0);
+
+    at.rename("k", "k.tmp");
+    wait_for("watch removal after the rename", &|| removals() == 1);
+
+    at.write("k", "second\n");
+    wait_for("watch on the new file", &|| file_watches() == 2);
+    std::thread::sleep(Duration::from_millis(300));
+
+    sleeper.kill().unwrap();
+    sleeper.wait().unwrap();
+    child
+        .wait()
+        .unwrap()
+        .success()
+        .stdout_is("first\nsecond\n")
+        .stderr_is(format!(
+            "{0}: 'k' has become inaccessible: No such file or directory\n\
+             {0}: 'k' has appeared;  following new file\n",
+            ts.util_name
+        ));
+}
+
 // Bug description: The content of a file is not printed to stdout if the output data does not
 // contain newlines and --follow was given as arguments.
 //
