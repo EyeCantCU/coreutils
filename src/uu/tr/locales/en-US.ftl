@@ -18,6 +18,7 @@ tr-error-missing-operand-deleting-squeezing = missing operand after { $set }
 tr-error-extra-operand-deleting-without-squeezing = extra operand { $operand }
   Only one string may be given when deleting without squeezing repeats.
 tr-error-extra-operand-simple = extra operand { $operand }
+tr-error-read-error = read error
 tr-error-read-directory = read error: Is a directory
 tr-error-write-error = write error
 
