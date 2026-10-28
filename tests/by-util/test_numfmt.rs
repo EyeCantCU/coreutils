@@ -6,7 +6,8 @@
 // spell-checker:ignore (paths) gnutest ronna quetta unitless
 
 use rstest::rstest;
-use uutests::new_ucmd;
+use uutests::util::TestScenario;
+use uutests::{at_and_ucmd, new_ucmd, util_name};
 
 #[test]
 fn test_invalid_arg() {
@@ -2137,4 +2138,30 @@ fn test_debug_unwritable_stderr() {
         .set_stderr(std::fs::File::create("/dev/full").unwrap())
         .fails_with_code(1)
         .stdout_is("1\n");
+}
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" numfmt"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("numfmt: error reading input: Bad file descriptor\n");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_read_error() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.mkdir("dir");
+    ucmd.set_stdin(std::fs::File::open(at.plus("dir")).unwrap())
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("numfmt: error reading input: Is a directory\n");
 }

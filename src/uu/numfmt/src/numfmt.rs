@@ -23,7 +23,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::str::FromStr;
 
 use uucore::display::Quotable;
-use uucore::error::{FromIo, UResult};
+use uucore::error::{FromIo, UResult, strip_errno};
 use uucore::i18n::decimal::locale_grouping_separator;
 use uucore::parser::parse_size::{IEC_BASES, SI_BASES};
 use uucore::parser::shortcut_value_parser::ShortcutValueParser;
@@ -190,6 +190,10 @@ fn handle_buffer<R: BufRead>(input: R, options: &NumfmtOptions) -> UResult<bool>
     with_stdout(|stdout| handle_buffer_to(input, options, stdout))
 }
 
+fn read_error(e: std::io::Error) -> NumfmtError {
+    NumfmtError::IoError(translate!("numfmt-error-reading-input", "error" => strip_errno(&e)))
+}
+
 fn handle_buffer_to<R: BufRead>(
     mut input: R,
     options: &NumfmtOptions,
@@ -202,9 +206,7 @@ fn handle_buffer_to<R: BufRead>(
 
     loop {
         buf.clear();
-        let n = input
-            .read_until(terminator, &mut buf)
-            .map_err(|e| NumfmtError::IoError(e.to_string()))?;
+        let n = input.read_until(terminator, &mut buf).map_err(read_error)?;
         if n == 0 {
             break;
         }
@@ -544,6 +546,8 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             .map_err(NumfmtError::IllegalArgument)?;
         handle_args(byte_args.into_iter(), &options, format_args.as_deref())
     } else {
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        uucore::signals::ensure_stdin_open().map_err(read_error)?;
         let stdin = std::io::stdin();
         handle_buffer(stdin.lock(), &options)
     };
@@ -759,10 +763,7 @@ mod tests {
         let mock_buffer = MockBuffer {};
         let result = handle_buffer(BufReader::new(mock_buffer), &get_valid_options())
             .expect_err("returned Ok after receiving IO error");
-        let result_debug = format!("{result:?}");
-        let result_display = format!("{result}");
-        assert_eq!(result_debug, "IoError(\"broken pipe\")");
-        assert_eq!(result_display, "broken pipe");
+        assert!(format!("{result:?}").starts_with("IoError("));
         assert_eq!(result.code(), 1);
     }
 
@@ -773,10 +774,7 @@ mod tests {
         options.header = 0;
         let result = handle_buffer(BufReader::new(mock_buffer), &options)
             .expect_err("returned Ok after receiving IO error");
-        let result_debug = format!("{result:?}");
-        let result_display = format!("{result}");
-        assert_eq!(result_debug, "IoError(\"broken pipe\")");
-        assert_eq!(result_display, "broken pipe");
+        assert!(format!("{result:?}").starts_with("IoError("));
         assert_eq!(result.code(), 1);
     }
 
