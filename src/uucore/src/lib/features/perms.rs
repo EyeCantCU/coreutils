@@ -557,6 +557,16 @@ impl ChownExecutor {
 
             let meta = match dir_fd.metadata_at(&entry_name, follow.into()) {
                 Ok(m) => m,
+                // Removed after the directory was read: nothing left to change, not an error.
+                // A dangling symlink that is followed is still reported.
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::NotFound
+                        && dir_fd
+                            .metadata_at(&entry_name, SymlinkBehavior::NoFollow)
+                            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    continue;
+                }
                 Err(e) => {
                     *ret = 1;
                     if self.verbosity.level != VerbosityLevel::Silent {
@@ -589,6 +599,14 @@ impl ChownExecutor {
                 if let Err(e) =
                     dir_fd.chown_at(&entry_name, chown_uid, chown_gid, follow_symlinks.into())
                 {
+                    // Same for an entry that vanished before it could be changed.
+                    if e.kind() == std::io::ErrorKind::NotFound
+                        && dir_fd
+                            .metadata_at(&entry_name, SymlinkBehavior::NoFollow)
+                            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                    {
+                        continue;
+                    }
                     *ret = 1;
                     if self.verbosity.level != VerbosityLevel::Silent {
                         let msg = format!(

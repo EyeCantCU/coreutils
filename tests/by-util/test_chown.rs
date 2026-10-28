@@ -3,7 +3,7 @@
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-// spell-checker:ignore (words) agroupthatdoesntexist auserthatdoesntexist groupname notexisting passgrp
+// spell-checker:ignore (words) agroupthatdoesntexist auserthatdoesntexist groupname notexisting passgrp fchownat
 
 #[cfg(all(unix, not(target_os = "openbsd")))]
 use std::os::unix::fs::MetadataExt;
@@ -1166,5 +1166,61 @@ fn test_repeated_flags_are_accepted() {
             .arg(geteuid().to_string())
             .arg("dir")
             .succeeds();
+    }
+}
+
+/// Under `-R`, a vanished entry is skipped silently, as GNU does; other errors are reported.
+/// `strace` fakes the failure for `foo`; for ENOENT the stat calls fail too, as for a removed entry.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_chown_recursive_entry_vanished() {
+    use std::process::Command;
+
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.mkdir("d");
+    scene.fixtures.touch("d/foo");
+    let id = rustix::process::geteuid().as_raw().to_string();
+
+    let run = |calls: &str, errno: &str| {
+        Command::new("strace")
+            .args(["--quiet=all", "-o", "/dev/null", "-P", "foo", "-e"])
+            .arg(format!("inject={calls}:error={errno}"))
+            .arg(&scene.bin_path)
+            .arg(scene.util_name.as_str())
+            .args(["-R", &id, "."])
+            .current_dir(scene.fixtures.plus("d"))
+            .output()
+            .ok()
+    };
+
+    // Skip when strace (or its fault injection) is unavailable.
+    let Some(output) = run("chown,lchown,fchownat", "EIO").filter(|o| o.status.code() == Some(1))
+    else {
+        return;
+    };
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "chown: changing ownership of './foo': Input/output error\n"
+    );
+
+    let output = run("chown,lchown,fchownat,newfstatat,fstatat64,statx", "ENOENT").unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+/// Under `-R`, an entry that is gone is skipped, but a dangling symlink is still an error.
+#[test]
+#[cfg(unix)]
+fn test_chown_recursive_dangling_symlink() {
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.mkdir("d");
+    scene.fixtures.symlink_file("nonexistent", "d/dang");
+    let id = rustix::process::geteuid().as_raw().to_string();
+    for flag in ["-RL", "-RH"] {
+        scene
+            .ucmd()
+            .args(&[flag, &id, "d"])
+            .fails_with_code(1)
+            .stderr_contains("d/dang");
     }
 }
