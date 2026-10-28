@@ -910,3 +910,17 @@ fn test_merge_prefix_lines(
     };
     cmd.args(&files).succeeds().stdout_only(expected);
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // A stdin closed at startup is reported, not read as empty.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" comm - /dev/null"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("comm: -: Bad file descriptor\n");
+}

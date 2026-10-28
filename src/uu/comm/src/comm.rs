@@ -325,6 +325,8 @@ fn comm(
 
 fn open_file(name: &OsString, line_ending: LineEnding) -> io::Result<LineReader> {
     if name == "-" {
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        uucore::signals::ensure_stdin_open()?;
         Ok(LineReader::new(Input::stdin(), line_ending))
     } else {
         // some platforms shows different read error
