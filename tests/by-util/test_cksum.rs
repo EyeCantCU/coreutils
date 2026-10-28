@@ -3993,3 +3993,40 @@ fn test_check_improperly_formatted_line_does_not_select_format() {
         .stdout_is("a: OK\n")
         .stderr_contains("1 line is improperly formatted");
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // A stdin closed at startup is reported, not read as empty.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" cksum -a md5 -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("cksum: -: Bad file descriptor\n");
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" cksum -c -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("cksum: 'standard input': Bad file descriptor\n");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_unreadable_directory() {
+    // The open error is reported, not "Is a directory" from the metadata.
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    let (at, mut ucmd) = uutests::at_and_ucmd!();
+    at.mkdir("dir");
+    at.set_mode("dir", 0o000);
+    ucmd.arg("dir")
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("cksum: dir: Permission denied\n");
+}
