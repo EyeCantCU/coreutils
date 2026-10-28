@@ -7,7 +7,7 @@
 
 #![allow(clippy::borrow_as_ptr)]
 
-use uutests::{at_and_ucmd, new_ucmd};
+use uutests::{at_and_ucmd, new_ucmd, util::TestScenario, util_name};
 
 use regex::Regex;
 use std::process::Stdio;
@@ -843,4 +843,21 @@ fn test_write_failure_reports_error_and_nonzero_exit() {
     let result = ucmd.arg("out_dir").pipe_in("data").fails();
 
     assert!(!result.stderr_str().is_empty());
+}
+
+/// With a standard output closed at startup, the files are still written completely.
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdout_files_complete() {
+    let (at, _ucmd) = at_and_ucmd!();
+    at.write_bytes("in", &vec![b'x'; 300_000]);
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .current_dir(&at.subdir)
+        .args(&["-c", "exec >&-; \"$0\" tee o1 < in"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stderr_is("tee: write error: Bad file descriptor\n");
+    assert_eq!(at.read_bytes("o1").len(), 300_000);
 }

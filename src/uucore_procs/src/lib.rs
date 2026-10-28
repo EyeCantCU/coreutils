@@ -51,8 +51,11 @@ pub fn main(args: TokenStream, stream: TokenStream) -> TokenStream {
             // disable rust signal handlers (otherwise processes don't dump core after e.g. one SIGSEGV)
             #[cfg(all(#signals, unix))]
             uucore::disable_rust_signal_handlers().expect("Disabling rust signal handlers failed");
+            // The Rust runtime reopens a closed stdout on /dev/null; watch it to diagnose writes.
+            #[cfg(all(unix, not(target_os = "fuchsia")))]
+            let closed_stdout = uucore::signals::ClosedStdout::watch();
             let result = uumain(args);
-            match result {
+            let code = match result {
                 Ok(()) => uucore::error::get_exit_code(),
                 Err(e) => {
                     let s = format!("{e}");
@@ -65,7 +68,13 @@ pub fn main(args: TokenStream, stream: TokenStream) -> TokenStream {
                     }
                     e.code()
                 }
-            }
+            };
+            #[cfg(all(unix, not(target_os = "fuchsia")))]
+            let code = match closed_stdout {
+                Some(closed_stdout) => closed_stdout.finish(code),
+                None => code,
+            };
+            code
         }
     );
 

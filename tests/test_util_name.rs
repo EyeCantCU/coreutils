@@ -301,6 +301,29 @@ fn util_version() {
     }
 }
 
+/// `--version` with a standard output closed at startup reports a write error.
+#[test]
+#[cfg(unix)]
+fn util_version_closed_stdout() {
+    use std::process::Command;
+
+    let scenario = TestScenario::new("--version");
+    if !scenario.bin_path.exists() {
+        println!("Skipping test: Binary not found at {:?}", scenario.bin_path);
+        return;
+    }
+    let output = Command::new("sh")
+        .args(["-c", "exec >&-; \"$0\" --version"])
+        .arg(&scenario.bin_path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "coreutils: write error: Bad file descriptor\n"
+    );
+}
+
 #[test]
 #[cfg(target_env = "musl")]
 fn test_musl_no_dynamic_deps() {
