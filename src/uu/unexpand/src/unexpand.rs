@@ -310,6 +310,8 @@ fn open(path: &OsString) -> UResult<BufReader<Input>> {
         }
     }
     if path == "-" {
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        uucore::signals::ensure_stdin_open().map_err_context(|| path.maybe_quote().to_string())?;
         return Ok(BufReader::new(Input::Stdin(stdin())));
     }
     let f = File::open(path).map_err_context(|| path.maybe_quote().to_string())?;

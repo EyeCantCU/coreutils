@@ -508,3 +508,18 @@ fn test_backspaces_before_last_tab_stop_resume_conversion() {
         .succeeds()
         .stdout_is("abcde\x08\x08\tX\n");
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // A stdin closed at startup is reported, not read as empty.
+    let scene = uutests::util::TestScenario::new(uutests::util_name!());
+    scene.fixtures.write("file", "        a\n");
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" unexpand - file"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stdout_is("\ta\n")
+        .stderr_is("unexpand: -: Bad file descriptor\n");
+}
