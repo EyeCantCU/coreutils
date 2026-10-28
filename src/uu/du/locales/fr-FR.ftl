@@ -60,6 +60,7 @@ du-error-invalid-glob = Syntaxe d'exclusion invalide : { $error }
 du-error-cannot-read-directory = impossible de lire le répertoire { $path }
 du-error-cannot-access = impossible d'accéder à { $path }
 du-error-read-error-is-directory = { $file } : erreur de lecture : C'est un répertoire
+du-error-read-error = { $file } : erreur de lecture : { $error }
 du-error-cannot-open-for-reading = impossible d'ouvrir { $file } en lecture : Aucun fichier ou répertoire de ce type
 du-error-invalid-zero-length-file-name = { $file }:{ $line } : nom de fichier de longueur zéro invalide
 du-error-extra-operand-with-files0-from = opérande supplémentaire { $file }

@@ -24,7 +24,7 @@ use std::thread;
 use std::time::SystemTime;
 use uucore::diagnostics::OptionValue;
 use uucore::display::{Quotable, print_verbatim};
-use uucore::error::{FromIo, UError, UResult, USimpleError, set_exit_code};
+use uucore::error::{FromIo, UError, UResult, USimpleError, set_exit_code, strip_errno};
 use uucore::fs::SYMLINK_FOLLOW_LIMIT;
 use uucore::fsext::{MetadataTimeField, metadata_get_time};
 use uucore::line_ending::LineEnding;
@@ -944,7 +944,14 @@ impl StatPrinter {
 
 /// Read file paths from the specified file, separated by null characters
 fn read_files_from(file_name: &OsStr) -> io::Result<Vec<PathBuf>> {
+    let read_error = |e: io::Error| {
+        io::Error::other(
+            translate!("du-error-read-error", "file" => file_name.maybe_quote(), "error" => strip_errno(&e)),
+        )
+    };
     let reader: Box<dyn BufRead> = if file_name == "-" {
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        uucore::signals::ensure_stdin_open().map_err(read_error)?;
         // Read from standard input
         Box::new(BufReader::new(io::stdin()))
     } else {
@@ -971,7 +978,7 @@ fn read_files_from(file_name: &OsStr) -> io::Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
 
     for (i, line) in reader.split(b'\0').enumerate() {
-        let path = line?;
+        let path = line.map_err(read_error)?;
 
         if path.is_empty() {
             let line_number = i + 1;
