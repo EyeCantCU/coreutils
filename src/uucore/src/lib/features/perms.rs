@@ -502,6 +502,9 @@ impl ChownExecutor {
 
             let meta = match dir_fd.metadata_at(&entry_name, follow.into()) {
                 Ok(m) => m,
+                // The entry was removed after the directory was read: there is
+                // nothing left to change, so this is not an error.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => {
                     *ret = 1;
                     if self.verbosity.level != VerbosityLevel::Silent {
@@ -531,6 +534,10 @@ impl ChownExecutor {
                 if let Err(e) =
                     dir_fd.chown_at(&entry_name, chown_uid, chown_gid, follow_symlinks.into())
                 {
+                    // Likewise for an entry that vanished before it could be changed.
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        continue;
+                    }
                     *ret = 1;
                     if self.verbosity.level != VerbosityLevel::Silent {
                         let msg = format!(
