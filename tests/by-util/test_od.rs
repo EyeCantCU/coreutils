@@ -1709,3 +1709,41 @@ fn test_width_invalid_numbers() {
             .stderr_only(format!("od: {message}\n"));
     }
 }
+
+#[test]
+fn test_byte_counts_above_signed_max_are_too_large() {
+    for option in ["-j", "-N", "-S", "-w"] {
+        new_ucmd!()
+            .arg(format!("{option}9223372036854775808"))
+            .pipe_in("")
+            .fails_with_code(1)
+            .stderr_only(format!(
+                "od: {option} argument '9223372036854775808' too large\n"
+            ));
+    }
+    // -S needs room for one more byte than the requested length.
+    new_ucmd!()
+        .arg("-S9223372036854775807")
+        .pipe_in("")
+        .fails_with_code(1)
+        .stderr_only("od: -S argument '9223372036854775807' too large\n");
+    new_ucmd!()
+        .args(&["-An", "-N9223372036854775807"])
+        .pipe_in("a")
+        .succeeds()
+        .stdout_only(" 000141\n");
+}
+
+#[test]
+fn test_bad_number_argument_quotes_control_chars() {
+    new_ucmd!()
+        .args(&["-j", "a\t"])
+        .pipe_in("")
+        .fails_with_code(1)
+        .stderr_only("od: invalid -j argument 'a\\t'\n");
+    new_ucmd!()
+        .args(&["-j", "1\t"])
+        .pipe_in("")
+        .fails_with_code(1)
+        .stderr_only("od: invalid suffix in -j argument '1\\t'\n");
+}
