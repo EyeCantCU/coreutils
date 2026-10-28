@@ -603,7 +603,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     };
 
     let output = OutputContext::new(&settings);
-    let mut stdout = BufWriter::new(std::io::stdout().lock());
+    let mut stdout = uucore::stdbuf::stdout_buf_writer(std::io::stdout().lock());
 
     // Format all the dates
     for date in dates {

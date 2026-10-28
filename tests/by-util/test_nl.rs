@@ -1039,3 +1039,21 @@ fn test_other_numeric_options_still_reject_values_above_the_limit() {
             .stderr_contains("invalid value '18446744073709551616'");
     }
 }
+
+#[test]
+#[cfg(unix)]
+fn test_stdbuf_line_buffered_stdout() {
+    // `stdbuf -oL` requests line buffered stdout through `_STDBUF_O`: output
+    // must then be written line by line while the input is still open.
+    let mut child = new_ucmd!()
+        .env("_STDBUF_O", "L")
+        .set_stdin(std::process::Stdio::piped())
+        .run_no_wait();
+    child.write_in("a\n");
+    child.delay(500);
+    child
+        .kill()
+        .make_assertion()
+        .with_current_output()
+        .stdout_only("     1\ta\n");
+}
