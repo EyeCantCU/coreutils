@@ -286,6 +286,11 @@ fn read_input(input_files: &[OsString], config: &Config) -> UResult<FileMap> {
         .and_then(|re_str| Regex::new(re_str).ok());
 
     for filename in input_files {
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        if filename == "-" {
+            uucore::signals::ensure_stdin_open()
+                .map_err_context(|| filename.quote().to_string())?;
+        }
         let mut reader: BufReader<Box<dyn Read>> = BufReader::new(if filename == "-" {
             Box::new(stdin())
         } else {
