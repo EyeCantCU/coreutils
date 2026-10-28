@@ -261,6 +261,8 @@ pub fn uu_app() -> Command {
 
 fn open(path: &OsString) -> UResult<BufReader<Box<dyn Read>>> {
     if path == "-" {
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        uucore::signals::ensure_stdin_open().map_err_context(|| path.maybe_quote().to_string())?;
         return Ok(BufReader::new(Box::new(stdin()) as Box<dyn Read>));
     }
     let path_ref = Path::new(path);

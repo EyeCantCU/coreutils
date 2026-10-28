@@ -476,3 +476,18 @@ fn test_buffered_reads_new_line_no_tabs_in_first_chunk() {
         .succeeds()
         .stdout_is_fixture("new_line_in_chunk_expected.txt");
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // A stdin closed at startup is reported, not read as empty.
+    let scene = uutests::util::TestScenario::new(uutests::util_name!());
+    scene.fixtures.write("file", "\ta\n");
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" expand - file"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stdout_is("        a\n")
+        .stderr_is("expand: -: Bad file descriptor\n");
+}
