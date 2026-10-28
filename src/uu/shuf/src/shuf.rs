@@ -280,6 +280,9 @@ fn open_output(output: Option<&Path>) -> UResult<BufWriter<Box<dyn OsWrite>>> {
 fn read_input_file(filename: &Path) -> UResult<Vec<u8>> {
     if filename.as_os_str() == "-" {
         let mut data = Vec::new();
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        uucore::signals::ensure_stdin_open()
+            .map_err_context(|| translate!("shuf-error-read-error"))?;
         stdin()
             .read_to_end(&mut data)
             .map_err_context(|| translate!("shuf-error-read-error"))?;
