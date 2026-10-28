@@ -14,6 +14,7 @@ env-help-ignore-signal = set handling of SIG signal(s) to do nothing
 env-help-default-signal = reset handling of SIG signal(s) to the default action
 env-help-block-signal = block delivery of SIG signal(s) while running COMMAND
 env-help-list-signal-handling = list signal handling changes requested by preceding options
+env-help-env0-from = read NUL-terminated environment entries from FILE ('-' for standard input)
 
 # Error messages
 env-error-missing-closing-quote = no terminating quote in -S string at position { $position } for quote '{ $quote }'
@@ -36,6 +37,9 @@ env-error-must-specify-command-with-chdir = must specify command with --chdir (-
 env-error-cannot-change-directory = cannot change directory to { $directory }: { $error }
 env-error-argv0-not-supported = --argv0 is currently not supported on this platform
 env-error-failed-set-signal-action = failed to set signal action for signal { $signal }: { $error }
+env-error-env0-from-read = cannot read { $file }: { $error }
+env-error-env0-from-unterminated = { $file }: last entry is not terminated by a NUL byte
+env-error-env0-from-invalid = invalid environment entry { $entry }
 
 # Warning messages
 env-warning-no-name-specified = no name specified for value { $value }

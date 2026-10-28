@@ -2189,6 +2189,100 @@ fn test_env_disallow_double_underscore_all() {
         .stderr_contains("invalid signal");
 }
 
+#[test]
+#[cfg(unix)]
+fn test_env0_from_ignore_environment_keeps_entries_verbatim() {
+    let raw: &[u8] = b"A=first\0opaque\0A=last\0\0=value\0B=\0";
+    let ts = TestScenario::new(util_name!());
+    let at = &ts.fixtures;
+    at.write_bytes("raw", raw);
+    ts.ucmd()
+        .args(&["-i", "--env0-from=raw", "-0"])
+        .succeeds()
+        .stdout_is_bytes(raw);
+
+    // -u removes every entry for the name, assignments then replace or append
+    ts.ucmd()
+        .args(&[
+            "-i",
+            "--env0-from=raw",
+            "-u",
+            "A",
+            "-0",
+            "B=changed",
+            "C=new",
+        ])
+        .succeeds()
+        .stdout_is_bytes(b"opaque\0\0=value\0B=changed\0C=new\0");
+
+    // a mere - also ignores the inherited environment
+    ts.ucmd()
+        .args(&["-0", "--env0-from=raw", "-"])
+        .succeeds()
+        .stdout_is_bytes(raw);
+}
+
+#[test]
+#[cfg(unix)]
+fn test_env0_from_merges_with_inherited_environment() {
+    let ts = TestScenario::new(util_name!());
+    let at = &ts.fixtures;
+    at.write_bytes(
+        "vars",
+        b"E0_REPLACE=file\0E0_NEW=new\0E0_REMOVE=file\0E0_DUP=1\0E0_DUP=2\0",
+    );
+    let out = ts
+        .ucmd()
+        .env("E0_PARENT", "parent")
+        .env("E0_REPLACE", "parent")
+        .env("E0_REMOVE", "parent")
+        .args(&["--env0-from=vars", "-u", "E0_REMOVE", "E0_REPLACE=operand"])
+        .succeeds()
+        .stdout_move_str();
+    let mut found: Vec<&str> = out.lines().filter(|l| l.starts_with("E0_")).collect();
+    found.sort_unstable();
+    assert_eq!(
+        found,
+        [
+            "E0_DUP=2",
+            "E0_NEW=new",
+            "E0_PARENT=parent",
+            "E0_REPLACE=operand"
+        ]
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_env0_from_stdin_and_errors() {
+    new_ucmd!()
+        .args(&["-i", "--env0-from=-", "-0"])
+        .pipe_in(&b"A=stdin\0"[..])
+        .succeeds()
+        .stdout_is_bytes(b"A=stdin\0");
+
+    let ts = TestScenario::new(util_name!());
+    let at = &ts.fixtures;
+    at.write("empty", "");
+    ts.ucmd()
+        .args(&["-i", "--env0-from=empty"])
+        .succeeds()
+        .no_output();
+
+    at.write("unterminated", "A=unterminated");
+    ts.ucmd()
+        .args(&["--env0-from=unterminated", "true"])
+        .fails_with_code(125)
+        .no_stdout();
+    ts.ucmd()
+        .args(&["--env0-from=does-not-exist", "true"])
+        .fails_with_code(125)
+        .no_stdout();
+    ts.ucmd()
+        .args(&["--env0-from=empty", "-u", "", "true"])
+        .fails_with_code(125);
+}
+
 #[cfg(unix)]
 #[cfg(all(feature = "feat_diagnostics", not(wasi_runner)))]
 mod diagnostics {
