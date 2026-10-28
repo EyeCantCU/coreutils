@@ -937,13 +937,18 @@ fn is_directory_not_empty_error(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::DirectoryNotEmpty
 }
 
+/// FIFOs, sockets and device nodes have no data to copy: moving one to
+/// another file system means creating a new node of the same kind there.
 #[cfg(unix)]
-fn is_fifo(filetype: fs::FileType) -> bool {
+fn is_special(filetype: fs::FileType) -> bool {
     filetype.is_fifo()
+        || filetype.is_socket()
+        || filetype.is_char_device()
+        || filetype.is_block_device()
 }
 
 #[cfg(not(unix))]
-fn is_fifo(_filetype: fs::FileType) -> bool {
+fn is_special(_filetype: fs::FileType) -> bool {
     false
 }
 
@@ -996,8 +1001,8 @@ fn rename_with_fallback(
             {
                 rename_dir_fallback(from, to, display_manager, verbose)
             }
-        } else if is_fifo(file_type) {
-            rename_fifo_fallback(from, to)
+        } else if is_special(file_type) {
+            rename_special_fallback(from, to, &metadata)
         } else {
             #[cfg(unix)]
             {
@@ -1015,14 +1020,44 @@ fn rename_with_fallback(
     })
 }
 
-/// Replace the destination with a new pipe with the same name as the source.
+/// Create at `to` a special file of the same kind, permissions and device
+/// number as the one described by `metadata`. A failure is reported here,
+/// naming the file that could not be created, and an already-reported (empty)
+/// error is returned.
 #[cfg(unix)]
-fn rename_fifo_fallback(from: &Path, to: &Path) -> io::Result<()> {
-    if to.try_exists()? {
+fn create_special_file(to: &Path, metadata: &fs::Metadata) -> io::Result<()> {
+    use nix::sys::stat::{Mode, SFlag, mknod};
+    use std::os::unix::fs::MetadataExt;
+    use uucore::show_error;
+
+    let mode = metadata.mode() as nix::libc::mode_t;
+    let kind = SFlag::from_bits_truncate(mode & nix::libc::S_IFMT);
+    let perm = Mode::from_bits_truncate(mode & 0o7777);
+    #[allow(clippy::useless_conversion)]
+    let dev = metadata.rdev().try_into().unwrap_or_default();
+    if let Err(err) = mknod(to, kind, perm, dev) {
+        let msg = if metadata.file_type().is_fifo() {
+            translate!("mv-error-cannot-create-fifo", "path" => to.quote())
+        } else {
+            translate!("mv-error-cannot-create-special-file", "path" => to.quote())
+        };
+        show_error!("{}", io::Error::from(err).map_err_context(|| msg));
+        return Err(io::Error::other(""));
+    }
+    // mknod applies the umask; give the new node the source's permissions.
+    let _ = fs::set_permissions(to, fs::Permissions::from_mode(metadata.mode() & 0o7777));
+    Ok(())
+}
+
+/// Replace the destination with a new special file (FIFO, socket or device
+/// node) like the source, then remove the source.
+#[cfg(unix)]
+fn rename_special_fallback(from: &Path, to: &Path, metadata: &fs::Metadata) -> io::Result<()> {
+    if to.symlink_metadata().is_ok() {
         fs::remove_file(to)?;
     }
-    // rustix::fs::mkfifoat is linux only
-    nix::unistd::mkfifo(to, nix::sys::stat::Mode::from_bits_truncate(0o666))?;
+    create_special_file(to, metadata)?;
+    let _ = preserve_ownership(from, to);
     fs::remove_file(from)
 }
 
@@ -1031,7 +1066,7 @@ fn rename_fifo_fallback(from: &Path, to: &Path) -> io::Result<()> {
     clippy::unnecessary_wraps,
     reason = "fn sig must match on all platforms"
 )]
-fn rename_fifo_fallback(_from: &Path, _to: &Path) -> io::Result<()> {
+fn rename_special_fallback(_from: &Path, _to: &Path, _metadata: &fs::Metadata) -> io::Result<()> {
     Ok(())
 }
 
@@ -1382,9 +1417,12 @@ fn copy_file_with_hardlinks_helper(
         // Copy a symlink file (no-follow).
         // rename_symlink_fallback already preserves ownership and removes the source.
         rename_symlink_fallback(from, to)?;
-    } else if is_fifo(from.symlink_metadata()?.file_type()) {
-        // rustix::fs::mkfifoat is linux only
-        nix::unistd::mkfifo(to, nix::sys::stat::Mode::from_bits_truncate(0o666))?;
+    } else if let Some(metadata) = from
+        .symlink_metadata()
+        .ok()
+        .filter(|m| is_special(m.file_type()))
+    {
+        create_special_file(to, &metadata)?;
         // Preserve ownership (uid/gid) from the source
         let _ = preserve_ownership(from, to);
     } else {
