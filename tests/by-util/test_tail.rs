@@ -4243,6 +4243,98 @@ fn test_when_argument_files_are_triple_combinations_of_fifo_pipe_and_regular_fil
         .stdout_only(expected);
 }
 
+/// `tests/tail/inotify-rotate-resources.sh`: rotation removes and re-adds the file watch,
+/// from the main thread (strace runs without `-f`).
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(wasi_runner, ignore = "WASI: tail follow mode disabled")]
+fn test_follow_name_rotation_removes_file_watch() {
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    if !Command::new("strace")
+        .args(["-o", "/dev/null", "true"])
+        .status()
+        .is_ok_and(|s| s.success())
+    {
+        return; // strace is missing or cannot trace here
+    }
+
+    let ts = TestScenario::new(util_name!());
+    let at = &ts.fixtures;
+    at.write("k", "first\n");
+
+    let file_watches = || {
+        std::fs::read_to_string(at.plus("strace.out"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| {
+                l.starts_with("inotify_add_watch(") && l.contains("/k\"") && l.contains("IN_MODIFY")
+            })
+            .count()
+    };
+    let removals = || {
+        std::fs::read_to_string(at.plus("strace.out"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.starts_with("inotify_rm_watch("))
+            .count()
+    };
+    let wait_for = |what: &str, done: &dyn Fn() -> bool| {
+        let start = Instant::now();
+        while !done() {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "timed out: {what}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+
+    // tail stops following once this process is gone.
+    let mut sleeper = Command::new("sleep").arg("60").spawn().unwrap();
+    let pid_arg = format!("--pid={}", sleeper.id());
+    let child = ts
+        .cmd("strace")
+        .args(&[
+            "-o",
+            "strace.out",
+            "-e",
+            "trace=inotify_add_watch,inotify_rm_watch",
+            uutests::util::get_tests_binary(),
+            ts.util_name.as_str(),
+            "-F",
+            "-s.1",
+            "--max-unchanged-stats=1",
+            &pid_arg,
+            "k",
+        ])
+        .run_no_wait();
+
+    wait_for("watch on the file", &|| file_watches() == 1);
+    assert_eq!(removals(), 0);
+
+    at.rename("k", "k.tmp");
+    wait_for("watch removal after the rename", &|| removals() == 1);
+
+    at.write("k", "second\n");
+    wait_for("watch on the new file", &|| file_watches() == 2);
+    std::thread::sleep(Duration::from_millis(300));
+
+    sleeper.kill().unwrap();
+    sleeper.wait().unwrap();
+    child
+        .wait()
+        .unwrap()
+        .success()
+        .stdout_is("first\nsecond\n")
+        .stderr_is(format!(
+            "{0}: 'k' has become inaccessible: No such file or directory\n\
+             {0}: 'k' has appeared;  following new file\n",
+            ts.util_name
+        ));
+}
+
 // Bug description: The content of a file is not printed to stdout if the output data does not
 // contain newlines and --follow was given as arguments.
 //
@@ -5737,4 +5829,35 @@ fn test_header_quotes_name_with_control_char() {
     ucmd.args(&["-v", "-n1", "tab\there"])
         .succeeds()
         .stdout_only("==> 'tab'$'\\t''here' <==\nt\n");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(wasi_runner, ignore = "WASI: tail follow mode disabled")]
+fn test_follow_name_many_files_in_one_directory() {
+    // Per-file watches are best-effort and added after the directory's, so
+    // following many files in one directory works.
+    use std::process::Command;
+
+    let ts = TestScenario::new(util_name!());
+    let at = &ts.fixtures;
+    let names: Vec<String> = (0..300).map(|i| format!("f{i}")).collect();
+    for name in &names {
+        at.write(name, "x\n");
+    }
+
+    let mut sleeper = Command::new("sleep").arg("60").spawn().unwrap();
+    let pid_arg = format!("--pid={}", sleeper.id());
+    let mut child = ts
+        .ucmd()
+        .args(&["-F", "-n0", "-s.1", "--max-unchanged-stats=1", &pid_arg])
+        .args(&names)
+        .run_no_wait();
+    child.delay(500);
+    at.append("f299", "late\n");
+    child.delay(500);
+    sleeper.kill().unwrap();
+    sleeper.wait().unwrap();
+    let output = child.wait().unwrap();
+    output.success().stdout_contains("late\n");
 }
