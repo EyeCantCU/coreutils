@@ -202,7 +202,7 @@ fn expand_shortcuts(args: Vec<OsString>) -> Vec<OsString> {
 
     for arg in args {
         if let Some(arg) = arg.to_str() {
-            if arg.starts_with('-') && arg[1..].chars().all(is_digit_or_comma) {
+            if arg.len() > 1 && arg.starts_with('-') && arg[1..].chars().all(is_digit_or_comma) {
                 arg[1..]
                     .split(',')
                     .filter(|s| !s.is_empty())
@@ -308,6 +308,8 @@ fn open(path: &OsString) -> UResult<BufReader<Input>> {
         }
     }
     if path == "-" {
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        uucore::signals::ensure_stdin_open().map_err_context(|| path.maybe_quote().to_string())?;
         return Ok(BufReader::new(Input::Stdin(stdin())));
     }
     let f = File::open(path).map_err_context(|| path.maybe_quote().to_string())?;
