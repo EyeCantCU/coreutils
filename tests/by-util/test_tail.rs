@@ -5738,3 +5738,24 @@ fn test_header_quotes_name_with_control_char() {
         .succeeds()
         .stdout_only("==> 'tab'$'\\t''here' <==\nt\n");
 }
+
+#[rstest]
+#[case::lines("-n+1", "a\nb\n")]
+#[case::bytes("-c+1", "a\nb\n")]
+#[case::skip_lines("-n+2", "b\n")]
+#[cfg(unix)]
+fn test_stdbuf_line_buffered_stdout(#[case] arg: &str, #[case] expected: &str) {
+    // With `stdbuf -oL`, each line must be written while the input is still open.
+    let mut child = new_ucmd!()
+        .arg(arg)
+        .env("_STDBUF_O", "L")
+        .set_stdin(Stdio::piped())
+        .run_no_wait();
+    child.write_in("a\nb\n");
+    child.delay(500);
+    child
+        .kill()
+        .make_assertion()
+        .with_current_output()
+        .stdout_only(expected);
+}
