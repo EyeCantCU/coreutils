@@ -811,6 +811,23 @@ pub const fn stdin_was_closed() -> bool {
     false
 }
 
+/// Fails with "Bad file descriptor" if stdin was closed when the process started.
+///
+/// The Rust runtime reopens a closed stdin as `/dev/null`, which would read as empty input.
+#[cfg(unix)]
+pub fn ensure_stdin_open() -> std::io::Result<()> {
+    if stdin_was_closed() {
+        Err(Errno::EBADF.into())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(unix))]
+pub const fn ensure_stdin_open() -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(unix)]
 pub fn stdout_was_closed() -> bool {
     STDOUT_WAS_CLOSED.load(Ordering::Relaxed)
