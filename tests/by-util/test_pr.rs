@@ -1462,3 +1462,52 @@ fn test_long_line_is_streamed_under_memory_limit() {
         .pipe_in(vec![b'x'; 210 * 1024 * 1024])
         .succeeds();
 }
+
+#[test]
+#[cfg(unix)]
+fn test_stdbuf_line_buffered_stdout() {
+    // `stdbuf -oL` requests line buffered stdout through `_STDBUF_O`: each
+    // line must be written as soon as it has been read, while the input is
+    // still open.
+    let mut child = new_ucmd!()
+        .env("_STDBUF_O", "L")
+        .args(&["-t", "-n"])
+        .set_stdin(std::process::Stdio::piped())
+        .run_no_wait();
+    child.write_in("1\n");
+    child.delay(500);
+    child
+        .kill()
+        .make_assertion()
+        .with_current_output()
+        .stdout_only("    1\t1\n");
+}
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF, even with -r. Run through a
+    // shell so the process really starts with fd 0 closed.
+    for args in ["pr -", "pr -r -"] {
+        let scene = uutests::util::TestScenario::new(uutests::util_name!());
+        scene
+            .cmd("sh")
+            .args(&["-c", &format!("exec <&-; \"$0\" {args}")])
+            .arg(&scene.bin_path)
+            .fails_with_code(1)
+            .no_stdout()
+            .stderr_is("pr: 'standard input': Bad file descriptor\n");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn test_stdin_read_error_names_standard_input() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.mkdir("d");
+    ucmd.args(&["-t", "-"])
+        .set_stdin(std::fs::File::open(at.plus("d")).unwrap())
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("pr: 'standard input': Is a directory\n");
+}
