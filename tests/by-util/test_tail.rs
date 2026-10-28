@@ -2960,6 +2960,44 @@ fn test_fifo_with_pid() {
         .success();
 }
 
+/// A FIFO writer that stays silent must not keep tail from noticing that
+/// the `--pid` process is gone.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_fifo_with_pid_and_silent_writer() {
+    use std::process::{Command, Stdio};
+
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.mkfifo("FIFO");
+
+    let mut writer = Command::new("sh")
+        .args(["-c", "exec 3>FIFO; echo a >&3; exec sleep 30"])
+        .current_dir(at.as_string())
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut dummy = Command::new("sleep").arg("1").spawn().unwrap();
+
+    let mut child = ucmd
+        .args(&["-f", "-s.1"])
+        .arg(format!("--pid={}", dummy.id()))
+        .arg("FIFO")
+        .run_no_wait();
+
+    let _ = dummy.wait();
+    child.delay(1000);
+    let alive = child.is_alive();
+    let _ = writer.kill();
+    let _ = writer.wait();
+    assert!(!alive, "tail still running after the --pid process ended");
+    child
+        .make_assertion()
+        .with_all_output()
+        .stdout_is("a\n")
+        .no_stderr()
+        .success();
+}
+
 #[test]
 #[cfg(unix)]
 #[ignore = "disabled until fixed"]
