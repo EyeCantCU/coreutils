@@ -8,7 +8,7 @@
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, metadata};
-use std::io::{self, BufRead, BufReader, BufWriter, Write, stdin, stdout};
+use std::io::{self, BufRead, BufReader, Write, stdin, stdout};
 use std::time::SystemTime;
 
 use uucore::display::Quotable;
@@ -406,7 +406,8 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         Err(e) => return Err(USimpleError::new(1, e.to_string())),
     };
 
-    let mut out = BufWriter::new(stdout().lock());
+    // Under `stdbuf -oL` each line is written as soon as it is complete.
+    let mut out = uucore::stdbuf::stdout_buf_writer(stdout().lock());
     let mut failed = false;
     let result = if settings.merge {
         print_merged(&files, &settings, &mut out, &mut failed)
@@ -1104,22 +1105,35 @@ struct Input {
     skip_newline: bool,
     /// Set once reading failed; the error has been reported.
     failed: bool,
-    quiet: bool,
+}
+
+/// How a file is named in error messages.
+fn display_name(name: &OsStr) -> String {
+    if name == FILE_STDIN {
+        translate!("pr-standard-input").quote().to_string()
+    } else {
+        name.maybe_quote().to_string()
+    }
 }
 
 fn open_input(name: &OsStr, settings: &Settings) -> Option<Input> {
     let quiet = settings.quiet;
-    let reader: Box<dyn BufRead> = if name == FILE_STDIN {
-        Box::new(BufReader::new(stdin()))
+    let opened = if name == FILE_STDIN {
+        // A stdin that was closed at startup must not read as empty input.
+        uucore::signals::ensure_stdin_open()
+            .map(|()| Box::new(BufReader::new(stdin())) as Box<dyn BufRead>)
     } else {
-        match File::open(name) {
-            Ok(f) => Box::new(BufReader::new(f)),
-            Err(e) => {
-                if !quiet {
-                    show_error!("{}: {}", name.maybe_quote(), strip_errno(&e));
-                }
-                return None;
+        File::open(name).map(|f| Box::new(BufReader::new(f)) as Box<dyn BufRead>)
+    };
+    let reader = match opened {
+        Ok(reader) => reader,
+        Err(e) => {
+            // -r only silences files that cannot be opened; stdin is always open
+            // as far as pr is concerned, so its failure is a read error.
+            if !quiet || name == FILE_STDIN {
+                show_error!("{}: {}", display_name(name), strip_errno(&e));
             }
+            return None;
         }
     };
     Some(Input {
@@ -1127,15 +1141,13 @@ fn open_input(name: &OsStr, settings: &Settings) -> Option<Input> {
         name: name.to_owned(),
         skip_newline: false,
         failed: false,
-        quiet,
     })
 }
 
 impl Input {
+    /// Report a read error, which `-r` does not silence.
     fn report(&mut self, e: &io::Error) {
-        if !self.quiet {
-            show_error!("{}: {}", self.name.maybe_quote(), strip_errno(e));
-        }
+        show_error!("{}: {}", display_name(&self.name), strip_errno(e));
         self.failed = true;
     }
 
@@ -1716,6 +1728,8 @@ fn print_file(
     settings: &Settings,
     out: &mut impl Write,
 ) -> Result<bool, PrError> {
+    // Output for earlier files goes out before any error about this one.
+    out.flush().map_err(PrError::Write)?;
     let frame = PageFrame::new(settings, (!settings.merge).then_some(name));
     let mut counter = Counter::new();
     let mut reached_last = false;

@@ -89,6 +89,9 @@ pr-help-show-control-chars = utiliser la notation circonflexe (^G) et la notatio
 pr-help-show-nonprinting = utiliser la notation octale avec barre oblique inverse
 pr-help-help = Afficher les informations d'aide
 
+# Nom de l'entrée standard dans les messages d'erreur
+pr-standard-input = entrée standard
+
 # Texte d'en-tête de page
 pr-page = Page
 
