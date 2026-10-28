@@ -4,7 +4,7 @@
 // file that was distributed with this source code.
 
 // spell-checker:ignore (paths) atim sublink subwords azerty azeaze xcwww azeaz amaz azea qzerty tazerty tsublink testfile1 testfile2 filelist fpath testdir testfile
-// spell-checker:ignore selfref ELOOP smallfile
+// spell-checker:ignore selfref ELOOP smallfile newfstatat readdir
 
 #[cfg(not(windows))]
 use regex::Regex;
@@ -3000,4 +3000,43 @@ fn test_summarize_with_max_depth() {
         .args(&["-s", "-d", "x", "/dev/null"])
         .fails_with_code(1)
         .stderr_contains("invalid maximum depth");
+}
+
+/// An entry that disappears between reading the directory and stating it no
+/// longer takes up space: it is skipped without an error, as GNU does, while
+/// any other failure to stat it is still reported. `strace` fakes the failure.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_du_entry_vanished_after_readdir() {
+    use std::process::Command;
+
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.mkdir("d");
+    scene.fixtures.touch("d/foo");
+
+    let run = |errno: &str| {
+        Command::new("strace")
+            .args(["--quiet=all", "-o", "/dev/null", "-P", "foo", "-e"])
+            .arg(format!("inject=stat,statx,lstat,newfstatat:error={errno}"))
+            .arg(&scene.bin_path)
+            .arg(scene.util_name.as_str())
+            .args(["-a", "."])
+            .current_dir(scene.fixtures.plus("d"))
+            .output()
+            .ok()
+    };
+
+    // Skip when strace (or its fault injection) is unavailable.
+    let Some(output) = run("EIO").filter(|o| o.status.code() == Some(1)) else {
+        return;
+    };
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "du: cannot access './foo': Input/output error\n"
+    );
+
+    let output = run("ENOENT").unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "0\t.\n");
 }
