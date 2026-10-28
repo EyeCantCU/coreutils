@@ -56,6 +56,7 @@ numfmt-help-zero-terminated = line delimiter is NUL, not newline
 
 # Error messages
 numfmt-error-unsupported-unit = Unsupported unit is specified
+numfmt-error-reading-input = error reading input: { $error }
 numfmt-error-invalid-unit-size = invalid unit size: { $size }
 numfmt-error-invalid-padding = invalid padding value { $value }
 numfmt-error-invalid-header = invalid header value { $value }
