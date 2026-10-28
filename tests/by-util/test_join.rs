@@ -1056,3 +1056,77 @@ fn test_last_of_check_order_nocheck_order_wins() {
         .fails_with_code(1)
         .stderr_is("join: a.txt:2: is not sorted: a\n");
 }
+
+#[test]
+fn test_unquoted_field_list_operands() {
+    let ts = TestScenario::new(util_name!());
+    let at = &ts.fixtures;
+    at.write("l", "1 a x\n2 b y\n");
+    at.write("r", "1 d u\n2 e v\n");
+
+    // Operands after the `-o` value extend its list while more than two remain.
+    ts.ucmd()
+        .args(&["-o", "1.1", "1.2", "1.3", "2.2", "l", "r"])
+        .succeeds()
+        .stdout_only("1 a x d\n2 b y e\n");
+    ts.ucmd()
+        .args(&["-o", "1.1\t1.2", "1.3\t2.2", "l", "r"])
+        .succeeds()
+        .stdout_only("1 a x d\n2 b y e\n");
+    ts.ucmd()
+        .args(&["-o", "1.1", "1.2", "-o", "2.2", "2.3", "l", "r"])
+        .succeeds()
+        .stdout_only("1 d a u\n2 e b v\n");
+
+    // Only the excess is taken: the rest are files.
+    ts.ucmd()
+        .args(&["-o", "1.1", "1.2", "2.2", "l"])
+        .fails_with_code(1)
+        .stderr_only("join: 2.2: No such file or directory\n");
+    ts.ucmd()
+        .args(&["-o", "1.1", "3", "l", "r"])
+        .fails_with_code(1)
+        .stderr_only("join: invalid file number in field spec: '3'\n");
+
+    // Another argument in between, `--` or `auto` ends the list.
+    for args in [
+        &["-o", "1.1", "--", "1.2", "l", "r"][..],
+        &["-o", "1.1", "1.2", "-t", " ", "2.2", "l", "r"],
+        &["-o", "auto", "1.2", "l", "r"],
+    ] {
+        ts.ucmd()
+            .args(args)
+            .fails_with_code(1)
+            .stderr_contains("join: extra operand 'r'\n");
+    }
+}
+
+#[test]
+fn test_field_list_operands_need_a_file_slot() {
+    let ts = TestScenario::new(util_name!());
+    let at = &ts.fixtures;
+    at.write("l", "1 a\n2 b\n");
+    at.write("r", "1 c\n2 d\n");
+
+    // Two files before `-o`: whatever follows its value is an extra operand.
+    for (args, extra) in [
+        (&["l", "r", "-o", "1.1", "2.2"][..], "2.2"),
+        (&["l", "r", "-o", "1.1", "1.2", "2.2"], "1.2"),
+        (&["l", "r", "-o", "1.1", "-o", "1.2", "2.2"], "2.2"),
+    ] {
+        ts.ucmd()
+            .args(args)
+            .fails_with_code(1)
+            .stderr_contains(format!("join: extra operand '{extra}'\n"));
+    }
+
+    // One file before `-o`: the first operand after its value is a field.
+    ts.ucmd()
+        .args(&["l", "-o", "1.1", "2.2", "r"])
+        .succeeds()
+        .stdout_only("1 c\n2 d\n");
+    ts.ucmd()
+        .args(&["l", "-o", "1.1", "1.2", "2.2", "r"])
+        .succeeds()
+        .stdout_only("1 a c\n2 b d\n");
+}
