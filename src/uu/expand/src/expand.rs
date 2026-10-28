@@ -194,6 +194,7 @@ fn expand_shortcuts(args: Vec<OsString>) -> Vec<OsString> {
 
     for arg in args {
         if let Some(arg) = arg.to_str()
+            && arg.len() > 1
             && arg.starts_with('-')
             && arg[1..].chars().all(is_digit_or_comma)
         {
@@ -260,6 +261,8 @@ pub fn uu_app() -> Command {
 
 fn open(path: &OsString) -> UResult<BufReader<Box<dyn Read>>> {
     if path == "-" {
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        uucore::signals::ensure_stdin_open().map_err_context(|| path.maybe_quote().to_string())?;
         return Ok(BufReader::new(Box::new(stdin()) as Box<dyn Read>));
     }
     let path_ref = Path::new(path);
