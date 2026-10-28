@@ -16,7 +16,7 @@ use uucore::translate;
 
 use uucore::format_usage;
 
-use linebreak::break_lines;
+use linebreak::{ParaState, break_lines};
 use parasplit::ParagraphStream;
 
 mod linebreak;
@@ -226,6 +226,7 @@ fn process_file(
     });
 
     let p_stream = ParagraphStream::new(fmt_opts, &mut fp);
+    let mut para_state = ParaState::default();
     for para_result in p_stream {
         match para_result {
             Err(nfl) => {
@@ -238,7 +239,7 @@ fn process_file(
                         .map_err_context(|| translate!("fmt-error-failed-to-write-output"))?;
                 }
             }
-            Ok(para) => break_lines(&para, fmt_opts, ostream)
+            Ok(para) => break_lines(&para, fmt_opts, ostream, &mut para_state)
                 .map_err_context(|| translate!("fmt-error-failed-to-write-output"))?,
         }
     }

@@ -648,3 +648,54 @@ fn test_fmt_anti_prefix_keeps_missing_final_newline() {
             .stdout_only(expected);
     }
 }
+
+/// Endless input, whether one endless word or one endless paragraph, must be
+/// formatted in bounded memory, so that fmt gets to write and report the
+/// write error instead of running out of memory first.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+#[cfg_attr(
+    wasi_runner,
+    ignore = "WASI runner target is not suitable for this address-space-limit regression test"
+)]
+#[test]
+fn test_endless_input_bounded_memory() {
+    use rlimit::Resource;
+    use std::fs::File;
+    use std::io::Write;
+
+    const AS_LIMIT: u64 = 200 * 1024 * 1024;
+
+    new_ucmd!()
+        .limit(Resource::AS, AS_LIMIT, AS_LIMIT)
+        .arg("/dev/zero")
+        .set_stdout(File::create("/dev/full").unwrap())
+        .fails_with_code(1)
+        .stderr_contains("No space left on device");
+
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    let feeder = std::thread::spawn(move || {
+        let lines = b"y\n".repeat(4096);
+        while writer.write_all(&lines).is_ok() {}
+    });
+    new_ucmd!()
+        .limit(Resource::AS, AS_LIMIT, AS_LIMIT)
+        .set_stdin(reader)
+        .set_stdout(File::create("/dev/full").unwrap())
+        .fails_with_code(1)
+        .stderr_contains("No space left on device");
+    feeder.join().unwrap();
+}
+
+#[test]
+fn test_overlong_word_is_kept_whole() {
+    let word = "w".repeat(100_000);
+    new_ucmd!()
+        .pipe_in(format!("{word}\n"))
+        .succeeds()
+        .stdout_is(format!("{word}\n"));
+    new_ucmd!()
+        .args(&["-w", "20"])
+        .pipe_in(format!("{word} a b\nc\n"))
+        .succeeds()
+        .stdout_is(format!("{word}\na b c\n"));
+}
