@@ -1225,3 +1225,34 @@ fn test_accepted_multiplier_suffixes() {
             .succeeds();
     }
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" head -n1 -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("head: error reading 'standard input': Bad file descriptor\n");
+}
+
+#[test]
+#[cfg(all(target_os = "linux", not(wasi_runner)))]
+fn test_read_error_is_not_a_write_error() {
+    // A read error is reported against the input, and the next file is
+    // still processed.
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.write("file", "a\n");
+    for mode in ["-c1", "-n1", "-c-1", "-n-1"] {
+        scene
+            .ucmd()
+            .args(&["-q", mode, "/proc/self/mem", "file"])
+            .fails_with_code(1)
+            .stderr_is("head: error reading '/proc/self/mem': Input/output error\n");
+    }
+}
