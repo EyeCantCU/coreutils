@@ -16,7 +16,7 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fs::{self, File},
-    io::{self, Write, stderr},
+    io::{self, Write},
     iter,
     path::{Path, PathBuf},
     sync::LazyLock,
@@ -958,31 +958,20 @@ fn wc(inputs: &Inputs, settings: &Settings) -> UResult<()> {
         let disabled_empty = disabled.is_empty();
         let runtime_disabled = !features.disabled_runtime.is_empty();
 
-        if enabled_empty && !runtime_disabled {
-            let _ = writeln!(stderr(), "{}", translate!("wc-debug-hw-unavailable"));
+        let message = if enabled_empty && !runtime_disabled {
+            translate!("wc-debug-hw-unavailable")
         } else if runtime_disabled {
-            let _ = writeln!(
-                stderr(),
-                "{}",
-                translate!("wc-debug-hw-disabled-glibc", "features" => disabled.join(", "))
-            );
+            translate!("wc-debug-hw-disabled-glibc", "features" => disabled.join(", "))
         } else if !enabled_empty && disabled_empty {
-            let _ = writeln!(
-                stderr(),
-                "{}",
-                translate!("wc-debug-hw-using", "features" => enabled.join(", "))
-            );
+            translate!("wc-debug-hw-using", "features" => enabled.join(", "))
         } else {
-            let _ = writeln!(
-                stderr(),
-                "{}",
-                translate!(
-                    "wc-debug-hw-limited-glibc",
-                    "disabled" => disabled.join(", "),
-                    "enabled" => enabled.join(", ")
-                )
-            );
-        }
+            translate!(
+                "wc-debug-hw-limited-glibc",
+                "disabled" => disabled.join(", "),
+                "enabled" => enabled.join(", ")
+            )
+        };
+        uucore::error::write_stderr(&format!("{message}\n"));
     }
 
     for maybe_input in inputs.try_iter(settings)? {
