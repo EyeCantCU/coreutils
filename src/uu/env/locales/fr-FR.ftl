@@ -16,8 +16,10 @@ env-help-default-signal = réinitialiser la gestion du/des signal/signaux SIG à
 env-help-block-signal = bloquer la livraison du/des signal/signaux SIG pendant l'exécution de COMMAND
 env-help-list-signal-handling = lister les traitements de signaux modifiés par les options précédentes
 env-help-env0-from = lire les entrées d'environnement terminées par NUL depuis FICHIER ('-' pour l'entrée standard)
+env-help-quoting-style = utiliser le style de citation MOT pour les entrées d'environnement affichées : literal, locale, shell, shell-always, shell-escape, shell-escape-always, c, c-maybe, escape, clocale
 
 # Messages d'erreur
+env-warning-invalid-quoting-style = valeur invalide de la variable d'environnement QUOTING_STYLE ignorée : { $invalid }
 env-error-missing-closing-quote = aucune guillemet de fermeture dans la chaîne -S à la position { $position } pour la guillemet '{ $quote }'
 env-error-invalid-backslash-at-end = barre oblique inverse invalide à la fin de la chaîne dans -S à la position { $position } dans le contexte { $context }
 env-error-backslash-c-not-allowed = '\\c' ne doit pas apparaître dans une chaîne -S entre guillemets doubles à la position { $position }

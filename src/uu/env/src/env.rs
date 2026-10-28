@@ -12,7 +12,7 @@ pub mod string_expander;
 pub mod string_parser;
 pub mod variable_parser;
 
-use clap::builder::ValueParser;
+use clap::builder::{PossibleValue, ValueParser};
 use clap::{Arg, ArgAction, Command};
 use ini::Ini;
 use native_int_str::{
@@ -35,9 +35,8 @@ use std::env;
 use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io;
 use std::io::stderr;
-use std::io::{Read as _, Write as _};
+use std::io::{self, IsTerminal, Read as _, Write as _};
 #[cfg(all(unix, not(target_os = "fuchsia")))]
 use std::mem::zeroed;
 #[cfg(unix)]
@@ -45,9 +44,13 @@ use std::os::unix::ffi::OsStrExt;
 
 use uucore::display::Quotable;
 #[cfg(not(unix))]
-use uucore::display::print_all_env_vars;
+use uucore::display::{OsWrite, print_all_env_vars};
 use uucore::error::{ExitCode, UError, UResult, USimpleError, UUsageError, strip_errno};
 use uucore::line_ending::LineEnding;
+use uucore::parser::shortcut_value_parser::ShortcutValueParser;
+#[cfg(not(unix))]
+use uucore::quoting_style::locale_aware_escape_name;
+use uucore::quoting_style::{Quotes, QuotingStyle};
 #[cfg(all(unix, not(target_os = "fuchsia")))]
 use uucore::signals::{
     realtime_signal_bounds, signal_by_name_or_value, signal_name_by_value,
@@ -104,11 +107,13 @@ mod options {
     pub const BLOCK_SIGNAL: &str = "block-signal";
     pub const LIST_SIGNAL_HANDLING: &str = "list-signal-handling";
     pub const ENV0_FROM: &str = "env0-from";
+    pub const QUOTING_STYLE: &str = "quoting-style";
 }
 
 struct Options<'a> {
     ignore_env: bool,
     line_ending: LineEnding,
+    quoting_style: QuotingStyle,
     running_directory: Option<&'a OsStr>,
     files: Vec<&'a OsStr>,
     env0_from: Vec<&'a OsStr>,
@@ -434,6 +439,25 @@ pub fn uu_app() -> Command {
                 .help(translate!("env-help-argv0")),
         )
         .arg(
+            Arg::new(options::QUOTING_STYLE)
+                .long(options::QUOTING_STYLE)
+                .value_name("WORD")
+                .help(translate!("env-help-quoting-style"))
+                .value_parser(ShortcutValueParser::new([
+                    PossibleValue::new("literal"),
+                    PossibleValue::new("locale"),
+                    PossibleValue::new("shell"),
+                    PossibleValue::new("shell-escape"),
+                    PossibleValue::new("shell-always"),
+                    PossibleValue::new("shell-escape-always"),
+                    PossibleValue::new("clocale"),
+                    PossibleValue::new("c"),
+                    PossibleValue::new("c-maybe"),
+                    PossibleValue::new("escape"),
+                ]))
+                .overrides_with(options::QUOTING_STYLE),
+        )
+        .arg(
             Arg::new("vars")
                 .action(ArgAction::Append)
                 .value_parser(ValueParser::os_string()),
@@ -636,6 +660,7 @@ impl EnvAppData {
             options::FILE,
             options::UNSET,
             options::ENV0_FROM,
+            options::QUOTING_STYLE,
         ];
         let short_flags_with_args = ['a', 'C', 'f', 'u'];
         let mut consumed_split_payload_arg: Option<usize> = None;
@@ -886,9 +911,9 @@ impl EnvAppData {
         if opts.program.is_empty() {
             // no program provided, so just dump all env vars to stdout
             #[cfg(unix)]
-            raw_environ::print(opts.line_ending)?;
+            raw_environ::print(opts.quoting_style, opts.line_ending)?;
             #[cfg(not(unix))]
-            print_all_env_vars(opts.line_ending)?;
+            print_env_vars(opts.quoting_style, opts.line_ending)?;
         } else {
             return self.run_program(&opts, self.do_debug_printing);
         }
@@ -1021,6 +1046,74 @@ fn apply_removal_of_all_env_vars(opts: &Options<'_>) {
     }
 }
 
+/// Determine how printed environment entries are quoted.
+///
+/// `--quoting-style` always applies. Otherwise, entries are quoted only for a
+/// terminal (and not with `--null`), using the style named by the inherited
+/// `QUOTING_STYLE` variable, or `shell-escape` by default.
+fn make_quoting_style(matches: &clap::ArgMatches, line_ending: LineEnding) -> QuotingStyle {
+    if let Some(style) = matches.get_one::<String>(options::QUOTING_STYLE) {
+        parse_quoting_style(style).expect("validated by clap")
+    } else if line_ending == LineEnding::Newline && io::stdout().is_terminal() {
+        quoting_style_from_env().unwrap_or(QuotingStyle::SHELL_ESCAPE)
+    } else {
+        LITERAL
+    }
+}
+
+const LITERAL: QuotingStyle = QuotingStyle::Literal {
+    show_control: false,
+};
+
+/// Map a quoting style name to the closest style the shared quoting code
+/// supports.
+fn parse_quoting_style(style: &str) -> Option<QuotingStyle> {
+    Some(match style {
+        "literal" => LITERAL,
+        "shell" => QuotingStyle::SHELL,
+        "shell-always" => QuotingStyle::SHELL_QUOTE,
+        "shell-escape" => QuotingStyle::SHELL_ESCAPE,
+        "shell-escape-always" => QuotingStyle::SHELL_ESCAPE_QUOTE,
+        "c" | "c-maybe" | "clocale" => QuotingStyle::C_DOUBLE,
+        "locale" => QuotingStyle::C {
+            quotes: Quotes::Single,
+        },
+        "escape" => QuotingStyle::C_NO_QUOTES,
+        _ => return None,
+    })
+}
+
+/// The style named by the `QUOTING_STYLE` environment variable, if it is set
+/// and valid; an invalid value is reported and ignored.
+fn quoting_style_from_env() -> Option<QuotingStyle> {
+    let style = env::var_os("QUOTING_STYLE")?;
+    let parsed = style.to_str().and_then(parse_quoting_style);
+    if parsed.is_none() {
+        uucore::show_error!(
+            "{}",
+            translate!("env-warning-invalid-quoting-style", "invalid" => style.quote())
+        );
+    }
+    parsed
+}
+
+/// Print the environment, quoting each name and value with `style`.
+#[cfg(not(unix))]
+fn print_env_vars(style: QuotingStyle, line_ending: LineEnding) -> io::Result<()> {
+    if matches!(style, QuotingStyle::Literal { .. }) {
+        // Literal output passes every byte through unchanged.
+        return print_all_env_vars(line_ending);
+    }
+    let mut stdout = io::stdout().lock();
+    for (name, value) in env::vars_os() {
+        stdout.write_all_os(&locale_aware_escape_name(&name, style))?;
+        stdout.write_all(b"=")?;
+        stdout.write_all_os(&locale_aware_escape_name(&value, style))?;
+        write!(stdout, "{line_ending}")?;
+    }
+    stdout.flush()
+}
+
 #[cfg_attr(not(unix), allow(clippy::elidable_lifetime_names))]
 fn make_options<'a>(
     matches: &'a clap::ArgMatches,
@@ -1028,6 +1121,7 @@ fn make_options<'a>(
 ) -> UResult<Options<'a>> {
     let ignore_env = matches.get_flag("ignore-environment");
     let line_ending = LineEnding::from_zero_flag(matches.get_flag("null"));
+    let quoting_style = make_quoting_style(matches, line_ending);
     let running_directory = matches
         .get_one::<OsString>("chdir")
         .map(OsString::as_os_str);
@@ -1059,6 +1153,7 @@ fn make_options<'a>(
     let mut opts = Options {
         ignore_env,
         line_ending,
+        quoting_style,
         running_directory,
         files,
         env0_from,
@@ -1187,9 +1282,12 @@ fn apply_env0_from(opts: &Options<'_>) -> UResult<()> {
 /// without `=` or with an empty name.
 #[cfg(unix)]
 mod raw_environ {
-    use std::ffi::{CStr, CString, c_char};
+    use std::ffi::{CStr, CString, OsStr, c_char};
     use std::io::{self, Write};
+    use std::os::unix::ffi::OsStrExt;
+    use uucore::display::OsWrite;
     use uucore::line_ending::LineEnding;
+    use uucore::quoting_style::{QuotingStyle, locale_aware_escape_name};
 
     unsafe extern "C" {
         static mut environ: *const *const c_char;
@@ -1232,11 +1330,27 @@ mod raw_environ {
         }
     }
 
-    /// Print every entry of the environment as is.
-    pub fn print(line_ending: LineEnding) -> io::Result<()> {
+    /// Print every entry of the environment. Literal output passes each
+    /// entry through byte for byte; any other style quotes the name and the
+    /// value of each entry separately (an entry without `=` is quoted whole).
+    pub fn print(style: QuotingStyle, line_ending: LineEnding) -> io::Result<()> {
+        let literal = matches!(style, QuotingStyle::Literal { .. });
         let mut stdout = io::stdout().lock();
         for entry in entries() {
-            stdout.write_all(&entry)?;
+            if literal {
+                stdout.write_all(&entry)?;
+            } else {
+                let (name, value) = match entry.iter().position(|&b| b == b'=') {
+                    Some(i) => (&entry[..i], Some(&entry[i + 1..])),
+                    None => (&entry[..], None),
+                };
+                stdout.write_all_os(&locale_aware_escape_name(OsStr::from_bytes(name), style))?;
+                if let Some(value) = value {
+                    stdout.write_all(b"=")?;
+                    stdout
+                        .write_all_os(&locale_aware_escape_name(OsStr::from_bytes(value), style))?;
+                }
+            }
             write!(stdout, "{line_ending}")?;
         }
         stdout.flush()
