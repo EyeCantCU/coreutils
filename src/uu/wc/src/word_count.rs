@@ -4,7 +4,6 @@
 // file that was distributed with this source code.
 
 use std::cmp::max;
-use std::ops::{Add, AddAssign};
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct WordCount {
@@ -15,22 +14,29 @@ pub struct WordCount {
     pub max_line_length: usize,
 }
 
-impl Add for WordCount {
-    type Output = Self;
-
-    fn add(self, other: Self) -> Self {
-        Self {
-            bytes: self.bytes + other.bytes,
-            chars: self.chars + other.chars,
-            lines: self.lines + other.lines,
-            words: self.words + other.words,
-            max_line_length: max(self.max_line_length, other.max_line_length),
-        }
-    }
+/// Records which counters of a running total could not hold their true value.
+#[derive(Debug, Default, Copy, Clone)]
+pub struct CountOverflow {
+    pub bytes: bool,
+    pub chars: bool,
+    pub lines: bool,
+    pub words: bool,
 }
 
-impl AddAssign for WordCount {
-    fn add_assign(&mut self, other: Self) {
-        *self = *self + other;
+impl WordCount {
+    /// Adds `other` to `self`. A counter that would exceed `usize::MAX` stays at
+    /// `usize::MAX` and is flagged in `overflow`.
+    pub fn add_saturating(&mut self, other: &Self, overflow: &mut CountOverflow) {
+        fn add(sum: &mut usize, n: usize, overflowed: &mut bool) {
+            *sum = sum.checked_add(n).unwrap_or_else(|| {
+                *overflowed = true;
+                usize::MAX
+            });
+        }
+        add(&mut self.bytes, other.bytes, &mut overflow.bytes);
+        add(&mut self.chars, other.chars, &mut overflow.chars);
+        add(&mut self.lines, other.lines, &mut overflow.lines);
+        add(&mut self.words, other.words, &mut overflow.words);
+        self.max_line_length = max(self.max_line_length, other.max_line_length);
     }
 }

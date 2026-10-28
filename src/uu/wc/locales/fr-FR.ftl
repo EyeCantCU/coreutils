@@ -23,6 +23,10 @@ wc-error-cannot-open-for-reading = impossible d'ouvrir { $path } en lecture
 wc-error-read-error = { $path } : erreur de lecture
 wc-error-failed-to-print-result = échec de l'affichage du résultat pour { $title }
 wc-error-failed-to-print-total = échec de l'affichage du total
+wc-error-total-lines = total des lignes
+wc-error-total-words = total des mots
+wc-error-total-chars = total des caractères
+wc-error-total-bytes = total des octets
 
 # Messages d'erreur du décodeur
 decoder-error-invalid-byte-sequence = séquence d'octets invalide : { $bytes }
