@@ -2108,3 +2108,14 @@ fn test_repeated_field_is_an_error() {
         .fails_with_code(1)
         .stderr_only("numfmt: multiple field specifications\n");
 }
+
+/// A `--debug` message that cannot be written to stderr makes `numfmt` fail.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_debug_unwritable_stderr() {
+    new_ucmd!()
+        .args(&["--debug", "1"])
+        .set_stderr(std::fs::File::create("/dev/full").unwrap())
+        .fails_with_code(1)
+        .stdout_is("1\n");
+}
