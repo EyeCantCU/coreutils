@@ -1575,12 +1575,12 @@ fn test_oflag_keeps_append_mode_of_stdout(
     assert_eq!(at.read("out"), "old\nnew\n");
 }
 
-/// A failed truncate of the output names the file and the size, the copy
-/// still runs and prints its statistics, and the exit status is 1.
+/// A failed truncate at the seek offset is reported and nothing is copied.
 #[test]
 #[cfg(target_os = "linux")]
-fn test_failed_truncate_is_reported_and_copy_goes_on() {
+fn test_failed_truncate_is_reported_and_copy_stops() {
     use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, memfd_create};
+    use std::os::unix::fs::FileExt;
 
     // A memfd sealed against shrinking: truncating it to a smaller size fails
     // with EPERM, while writes inside the existing size still work.
@@ -1588,16 +1588,74 @@ fn test_failed_truncate_is_reported_and_copy_goes_on() {
     let memfd = File::from(fd);
     memfd.set_len(2048).unwrap();
     fcntl_add_seals(&memfd, SealFlags::SHRINK).unwrap();
+    memfd.write_all_at(&[b'x'; 2048], 0).unwrap();
 
     new_ucmd!()
-        .args(&["bs=512", "count=1", "seek=1", "of=/dev/stdout"])
-        .pipe_in(vec![b'a'; 512])
+        .args(&["if=/dev/zero", "bs=512", "count=1", "seek=1", "of=/dev/stdout"])
+        .set_stdout(Stdio::from(memfd.try_clone().unwrap()))
+        .fails_with_code(1)
+        .stderr_only(
+            "dd: failed to truncate to 512 bytes in output file '/dev/stdout': Operation not permitted\n",
+        );
+
+    let mut buf = vec![0; 4096];
+    assert_eq!(memfd.read_at(&mut buf, 0).unwrap(), 2048);
+    assert!(buf[..2048].iter().all(|&b| b == b'x'));
+}
+
+/// Without `seek=`, the output is truncated on open, so an unshrinkable file fails to open.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_output_truncated_on_open() {
+    use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, memfd_create};
+
+    let memfd = File::from(memfd_create("out", MemfdFlags::ALLOW_SEALING).unwrap());
+    memfd.set_len(2048).unwrap();
+    fcntl_add_seals(&memfd, SealFlags::SHRINK).unwrap();
+
+    new_ucmd!()
+        .args(&["if=/dev/zero", "bs=512", "count=1", "of=/dev/stdout"])
         .set_stdout(Stdio::from(memfd))
         .fails_with_code(1)
-        .stderr_contains(
-            "dd: failed to truncate to 512 bytes in output file '/dev/stdout': Operation not permitted\n",
-        )
-        .stderr_contains("1+0 records in\n1+0 records out\n");
+        .stderr_only("dd: failed to open '/dev/stdout': Operation not permitted\n");
+}
+
+/// When truncation fails and the file type cannot be read either, dd fails.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_failed_truncate_and_fstat() {
+    use std::process::Command;
+
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.write("out", "abc");
+    let out = scene.fixtures.plus("out");
+
+    let Ok(output) = Command::new("strace")
+        .args(["--quiet=all", "-o", "/dev/null", "-P"])
+        .arg(&out)
+        .args([
+            "-e",
+            "inject=ftruncate:error=EPERM",
+            "-e",
+            "inject=fstat:error=EIO",
+        ])
+        .arg(&scene.bin_path)
+        .arg(scene.util_name.as_str())
+        .args(["if=/dev/null", "seek=1", "status=none"])
+        .arg(format!("of={}", out.display()))
+        .output()
+    else {
+        // Skip when strace is unavailable.
+        return;
+    };
+    if String::from_utf8_lossy(&output.stderr).contains("strace") {
+        return;
+    }
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!("dd: cannot fstat '{}': Input/output error\n", out.display())
+    );
 }
 
 /// Test that a seek on an output FIFO results in a read.
