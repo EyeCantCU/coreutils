@@ -1250,10 +1250,8 @@ mod raw_environ {
                 stdout.write_all_os(&locale_aware_escape_name(OsStr::from_bytes(name), style))?;
                 if let Some(value) = value {
                     stdout.write_all(b"=")?;
-                    stdout.write_all_os(&locale_aware_escape_name(
-                        OsStr::from_bytes(value),
-                        style,
-                    ))?;
+                    stdout
+                        .write_all_os(&locale_aware_escape_name(OsStr::from_bytes(value), style))?;
                 }
             }
             write!(stdout, "{line_ending}")?;
