@@ -4260,3 +4260,14 @@ fn test_numeric_looking_file_names_are_kept_verbatim(
     at.touch("empty");
     ucmd.args(args).fails_with_code(2).stderr_is(expected);
 }
+
+/// A `--debug` message that cannot be written to stderr makes `sort` fail.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_debug_unwritable_stderr() {
+    new_ucmd!()
+        .args(&["--debug", "/dev/null"])
+        .set_stderr(std::fs::File::create("/dev/full").unwrap())
+        .fails_with_code(2)
+        .no_stdout();
+}
