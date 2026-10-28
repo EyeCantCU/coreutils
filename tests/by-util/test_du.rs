@@ -2952,3 +2952,32 @@ du: invalid suffix in --block-size argument '1fb'
             .stderr_is("du: invalid suffix in --block-size argument '1fb'\n");
     }
 }
+
+/// Names read with --files0-from are reported in the order they come in.
+#[test]
+#[cfg(unix)]
+fn test_files0_from_reports_in_order() {
+    new_ucmd!()
+        .args(&["--files0-from=-"])
+        .pipe_in("a\0\0/dev/null\0-\0")
+        .fails_with_code(1)
+        .stdout_is("0\t/dev/null\n")
+        .stderr_is(
+            "du: cannot access 'a': No such file or directory\n\
+             du: -:2: invalid zero-length file name\n\
+             du: when reading file names from standard input, no file name of '-' allowed\n",
+        );
+}
+
+/// A write error stops a long --files0-from list and is reported.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_files0_from_write_error() {
+    new_ucmd!()
+        .args(&["-l", "--files0-from=-"])
+        .pipe_in("/dev/null\0".repeat(10000))
+        .set_stdout(std::fs::File::create("/dev/full").unwrap())
+        .ignore_stdin_write_error()
+        .fails_with_code(1)
+        .stderr_is("du: No space left on device\n");
+}
