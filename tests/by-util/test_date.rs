@@ -4002,3 +4002,14 @@ fn test_invalid_date_escaping_depends_on_locale() {
             .stderr_is(expected);
     }
 }
+
+/// A `--debug` message that cannot be written to stderr makes `date` fail.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_debug_unwritable_stderr() {
+    new_ucmd!()
+        .args(&["--debug", "-u", "-d", "@0"])
+        .set_stderr(std::fs::File::create("/dev/full").unwrap())
+        .fails_with_code(1)
+        .stdout_is("Thu Jan  1 00:00:00 UTC 1970\n");
+}
