@@ -232,33 +232,117 @@ fn list_to_ranges(list: &str, complement: bool, is_field: bool) -> Result<Vec<Ra
     })
 }
 
-/// Write the parts of `line` selected by `ranges`, treating every byte as a
-/// character.
+/// How much of the current line a [`for_each_bounded_line`] slice holds.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LinePart {
+    /// The whole line.
+    Whole,
+    /// A piece of a line too long for the buffer, more of it to come.
+    Partial,
+    /// The last piece of a line too long for the buffer.
+    End,
+}
+
+/// Size of the input buffer, and so the longest line handed out whole.
+const LINE_BUFFER_SIZE: usize = 64 * 1024;
+
+/// Call `f` on each line of `reader`, terminator included when there is one.
+///
+/// A line that does not fit in the buffer is handed out in pieces as it is
+/// read, so memory use stays bounded even on an endless line.
+fn for_each_bounded_line<R: Read>(
+    mut reader: R,
+    newline_char: u8,
+    mut f: impl FnMut(&[u8], LinePart) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut buf = vec![0; LINE_BUFFER_SIZE];
+    // `buf[start..end]` holds what was read but not handed out yet; it has no
+    // line terminator.
+    let (mut start, mut end) = (0, 0);
+    // Whether part of the current line has already been handed out.
+    let mut in_long_line = false;
+    let part = |in_long_line| {
+        if in_long_line {
+            LinePart::End
+        } else {
+            LinePart::Whole
+        }
+    };
+    loop {
+        let n = match reader.read(&mut buf[end..]) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if n == 0 {
+            if start < end || in_long_line {
+                f(&buf[start..end], part(in_long_line))?;
+            }
+            return Ok(());
+        }
+        let read_from = end;
+        end += n;
+        for i in memchr::memchr_iter(newline_char, &buf[read_from..end]) {
+            let line_end = read_from + i + 1;
+            f(&buf[start..line_end], part(in_long_line))?;
+            in_long_line = false;
+            start = line_end;
+        }
+        if start == end {
+            (start, end) = (0, 0);
+        } else if end == buf.len() {
+            if start == 0 {
+                // The line fills the whole buffer: pass on what there is.
+                f(&buf[..end], LinePart::Partial)?;
+                in_long_line = true;
+                end = 0;
+            } else {
+                buf.copy_within(start..end, 0);
+                end -= start;
+                start = 0;
+            }
+        }
+    }
+}
+
+/// Write the parts of `piece` selected by `ranges`, treating every byte as a
+/// character. `piece` starts at byte `offset` of its line, and `print_delim`
+/// carries across the pieces of a line whether a delimiter goes before the
+/// next range.
 ///
 /// Always inlined: it is the body of the per-line loop, and a call per line
 /// costs more than the work it does on short lines.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn write_line_bytes<W: Write>(
-    line: &[u8],
+    piece: &[u8],
+    offset: usize,
+    print_delim: &mut bool,
     out: &mut W,
     ranges: &[Range],
     out_delim: &[u8],
     explicit_delim: bool,
 ) -> std::io::Result<()> {
-    let mut print_delim = false;
+    let end = offset + piece.len();
     for &Range { low, high } in ranges {
-        if low > line.len() {
+        if low > end {
             break;
         }
-        if print_delim {
-            out.write_all(out_delim)?;
-        } else if explicit_delim {
-            print_delim = true;
+        if high <= offset {
+            // The range ended in an earlier piece.
+            continue;
         }
-        // change `low` from 1-indexed value to 0-index value
-        let low = low - 1;
-        let high = high.min(line.len());
-        out.write_all(&line[low..high])?;
+        // `low` is 1-based, so this is true when the range starts in `piece`.
+        if low > offset {
+            if *print_delim {
+                out.write_all(out_delim)?;
+            } else if explicit_delim {
+                *print_delim = true;
+            }
+        }
+        let from = (low - 1).max(offset) - offset;
+        let to = high.min(end) - offset;
+        out.write_all(&piece[from..to])?;
     }
     Ok(())
 }
@@ -270,17 +354,34 @@ fn cut_bytes<R: Read, W: Write>(
     opts: &Options,
 ) -> UResult<()> {
     let newline_char = opts.line_ending.into();
-    let mut buf_in = BufReader::new(reader);
     let out_delim = opts.out_delimiter.unwrap_or(b"\t");
     let explicit_delim = opts.out_delimiter.is_some();
+    // Where the next piece of a long line starts, and whether a range of it
+    // has been written yet.
+    let (mut offset, mut print_delim) = (0, false);
 
-    buf_in
-        .for_byte_record(newline_char, |line| {
-            write_line_bytes(line, out, ranges, out_delim, explicit_delim)?;
-            out.write_all(&[newline_char])?;
-            Ok(true)
-        })
-        .map_err(|e| USimpleError::new(1, strip_errno(&e)))
+    for_each_bounded_line(reader, newline_char, |chunk, part| {
+        let piece = match part {
+            LinePart::Partial => chunk,
+            _ => chunk.strip_suffix(&[newline_char]).unwrap_or(chunk),
+        };
+        write_line_bytes(
+            piece,
+            offset,
+            &mut print_delim,
+            out,
+            ranges,
+            out_delim,
+            explicit_delim,
+        )?;
+        if part == LinePart::Partial {
+            offset += piece.len();
+            return Ok(());
+        }
+        (offset, print_delim) = (0, false);
+        out.write_all(&[newline_char])
+    })
+    .map_err(|e| USimpleError::new(1, strip_errno(&e)))
 }
 
 /// Offset of the first byte above `0x7F` in `bytes`, or `bytes.len()` if there
@@ -547,7 +648,171 @@ fn write_fields_line<W: Write, M: Matcher>(
     out.write_all(&[newline_char])
 }
 
+/// Cuts the fields of a line too long to be held at once, piece by piece as
+/// it is read. Only a single-byte delimiter can be told apart this way, since
+/// a longer one may straddle two pieces.
+struct LongLineFields<'a> {
+    ranges: &'a [Range],
+    delim: u8,
+    out_delim: &'a [u8],
+    only_delimited: bool,
+    newline_char: u8,
+    /// Number of the current field, from 1.
+    field: usize,
+    /// Whether the current field is selected.
+    selected: bool,
+    /// Whether the line has had a delimiter so far.
+    seen_delim: bool,
+    /// Whether a selected field has been written, so the next one needs a
+    /// delimiter before it.
+    printed: bool,
+    /// The first field, kept while it is unknown whether the line has a
+    /// delimiter when that decides if it is printed. This is the only part
+    /// that can grow with the line.
+    first_field: Vec<u8>,
+}
+
+impl<'a> LongLineFields<'a> {
+    fn new(
+        ranges: &'a [Range],
+        delim: u8,
+        out_delim: &'a [u8],
+        only_delimited: bool,
+        newline_char: u8,
+    ) -> Self {
+        Self {
+            ranges,
+            delim,
+            out_delim,
+            only_delimited,
+            newline_char,
+            field: 1,
+            selected: Self::is_selected(ranges, 1),
+            seen_delim: false,
+            printed: false,
+            first_field: Vec::new(),
+        }
+    }
+
+    fn is_selected(ranges: &[Range], field: usize) -> bool {
+        let idx = ranges.partition_point(|r| r.high < field);
+        ranges.get(idx).is_some_and(|r| r.low <= field)
+    }
+
+    /// Handle the next piece of the line, `end` telling whether it is the
+    /// last one (which may end with the line terminator).
+    fn feed<W: Write>(&mut self, out: &mut W, piece: &[u8], end: bool) -> std::io::Result<()> {
+        let mut rest = if end {
+            piece.strip_suffix(&[self.newline_char]).unwrap_or(piece)
+        } else {
+            piece
+        };
+        let last_high = self.ranges.last().map_or(0, |r| r.high);
+        // Past the last selected field the rest of the line does not matter,
+        // unless no delimiter was seen yet.
+        while !self.seen_delim || self.field <= last_high {
+            let Some(i) = memchr::memchr(self.delim, rest) else {
+                self.field_bytes(out, rest)?;
+                break;
+            };
+            self.field_bytes(out, &rest[..i])?;
+            self.next_field(out)?;
+            rest = &rest[i + 1..];
+        }
+        if end {
+            self.finish_line(out)?;
+        }
+        Ok(())
+    }
+
+    fn field_bytes<W: Write>(&mut self, out: &mut W, bytes: &[u8]) -> std::io::Result<()> {
+        if self.seen_delim {
+            if self.selected {
+                out.write_all(bytes)?;
+            }
+            return Ok(());
+        }
+        // A line without delimiter is printed whole, or not at all with
+        // `-s`. The first field can go straight out when that gives the same
+        // result either way, and be dropped when it is never printed.
+        match (self.selected, self.only_delimited) {
+            (true, false) => out.write_all(bytes),
+            (false, true) => Ok(()),
+            _ => {
+                self.first_field.extend_from_slice(bytes);
+                Ok(())
+            }
+        }
+    }
+
+    fn next_field<W: Write>(&mut self, out: &mut W) -> std::io::Result<()> {
+        if !self.seen_delim {
+            self.seen_delim = true;
+            if self.selected {
+                out.write_all(&self.first_field)?;
+                self.printed = true;
+            }
+            self.first_field = Vec::new();
+        }
+        self.field += 1;
+        self.selected = Self::is_selected(self.ranges, self.field);
+        if self.selected {
+            if self.printed {
+                out.write_all(self.out_delim)?;
+            }
+            self.printed = true;
+        }
+        Ok(())
+    }
+
+    fn finish_line<W: Write>(&mut self, out: &mut W) -> std::io::Result<()> {
+        if self.seen_delim || !self.only_delimited {
+            if !self.seen_delim {
+                out.write_all(&self.first_field)?;
+            }
+            out.write_all(&[self.newline_char])?;
+        }
+        *self = Self::new(
+            self.ranges,
+            self.delim,
+            self.out_delim,
+            self.only_delimited,
+            self.newline_char,
+        );
+        Ok(())
+    }
+}
+
+/// Call `write_line` on each line of `reader`, terminator included when there
+/// is one. A line too long for the input buffer goes to `long_line` piece by
+/// piece instead, or is put back together for `write_line` without it.
+fn for_each_fields_line<R: Read, W: Write>(
+    reader: R,
+    out: &mut W,
+    newline_char: u8,
+    mut long_line: Option<LongLineFields>,
+    mut write_line: impl FnMut(&mut W, &[u8]) -> std::io::Result<()>,
+) -> UResult<()> {
+    let mut held = Vec::new();
+    for_each_bounded_line(reader, newline_char, |chunk, part| {
+        if part == LinePart::Whole {
+            return write_line(out, chunk);
+        }
+        if let Some(state) = &mut long_line {
+            return state.feed(out, chunk, part == LinePart::End);
+        }
+        held.extend_from_slice(chunk);
+        if part == LinePart::End {
+            write_line(out, &held)?;
+            held = Vec::new();
+        }
+        Ok(())
+    })
+    .map_err(|e| USimpleError::new(1, e.to_string()))
+}
+
 /// Output delimiter is explicitly specified
+#[allow(clippy::too_many_arguments)]
 fn cut_fields_explicit_out_delim<R: Read, W: Write, M: Matcher>(
     reader: R,
     out: &mut W,
@@ -556,23 +821,19 @@ fn cut_fields_explicit_out_delim<R: Read, W: Write, M: Matcher>(
     only_delimited: bool,
     newline_char: u8,
     out_delim: &[u8],
+    long_line: Option<LongLineFields>,
 ) -> UResult<()> {
-    let mut buf_in = BufReader::new(reader);
-
-    buf_in
-        .for_byte_record_with_terminator(newline_char, |line| {
-            write_fields_line(
-                line,
-                out,
-                matcher,
-                ranges,
-                only_delimited,
-                newline_char,
-                out_delim,
-            )?;
-            Ok(true)
-        })
-        .map_err(|e| USimpleError::new(1, e.to_string()))
+    for_each_fields_line(reader, out, newline_char, long_line, |out, line| {
+        write_fields_line(
+            line,
+            out,
+            matcher,
+            ranges,
+            only_delimited,
+            newline_char,
+            out_delim,
+        )
+    })
 }
 
 /// Output delimiter is the same as input delimiter
@@ -583,60 +844,56 @@ fn cut_fields_implicit_out_delim<R: Read, W: Write, M: Matcher>(
     ranges: &[Range],
     only_delimited: bool,
     newline_char: u8,
+    long_line: Option<LongLineFields>,
 ) -> UResult<()> {
-    let mut buf_in = BufReader::new(reader);
+    for_each_fields_line(reader, out, newline_char, long_line, |out, line| {
+        let mut fields_pos = 1;
+        let mut low_idx = 0;
+        let mut delim_search = Searcher::new(matcher, line).peekable();
+        let mut print_delim = false;
 
-    buf_in
-        .for_byte_record_with_terminator(newline_char, |line| {
-            let mut fields_pos = 1;
-            let mut low_idx = 0;
-            let mut delim_search = Searcher::new(matcher, line).peekable();
-            let mut print_delim = false;
-
-            if delim_search.peek().is_none() {
-                if !only_delimited {
-                    // Always write the entire line, even if it doesn't end with `newline_char`
-                    out.write_all(line)?;
-                    if line.is_empty() || line[line.len() - 1] != newline_char {
-                        out.write_all(&[newline_char])?;
-                    }
+        if delim_search.peek().is_none() {
+            if !only_delimited {
+                // Always write the entire line, even if it doesn't end with `newline_char`
+                out.write_all(line)?;
+                if line.is_empty() || line[line.len() - 1] != newline_char {
+                    out.write_all(&[newline_char])?;
                 }
-
-                return Ok(true);
             }
 
-            for &Range { low, high } in ranges {
-                if low - fields_pos > 0 {
-                    if let Some((first, last)) = delim_search.nth(low - fields_pos - 1) {
-                        low_idx = if print_delim { first } else { last }
-                    } else {
-                        break;
-                    }
-                }
+            return Ok(());
+        }
 
-                if let Some((first, _)) = delim_search.nth(high - low) {
-                    let segment = &line[low_idx..first];
-
-                    out.write_all(segment)?;
-
-                    print_delim = true;
-                    low_idx = first;
-                    fields_pos = high + 1;
+        for &Range { low, high } in ranges {
+            if low - fields_pos > 0 {
+                if let Some((first, last)) = delim_search.nth(low - fields_pos - 1) {
+                    low_idx = if print_delim { first } else { last }
                 } else {
-                    let segment = &line[low_idx..line.len()];
-
-                    out.write_all(segment)?;
-
-                    if line[line.len() - 1] == newline_char {
-                        return Ok(true);
-                    }
                     break;
                 }
             }
-            out.write_all(&[newline_char])?;
-            Ok(true)
-        })
-        .map_err(|e| USimpleError::new(1, e.to_string()))
+
+            if let Some((first, _)) = delim_search.nth(high - low) {
+                let segment = &line[low_idx..first];
+
+                out.write_all(segment)?;
+
+                print_delim = true;
+                low_idx = first;
+                fields_pos = high + 1;
+            } else {
+                let segment = &line[low_idx..line.len()];
+
+                out.write_all(segment)?;
+
+                if line[line.len() - 1] == newline_char {
+                    return Ok(());
+                }
+                break;
+            }
+        }
+        out.write_all(&[newline_char])
+    })
 }
 
 /// Streams and filters fields where the record terminator and
@@ -822,6 +1079,7 @@ fn cut_fields_whitespace_trimmed<R: Read, W: Write>(
 
 /// Run field cutting with the given matcher, choosing the explicit- or
 /// implicit-output-delimiter routine.
+#[allow(clippy::too_many_arguments)]
 fn cut_fields_with_matcher<R: Read, W: Write, M: Matcher>(
     reader: R,
     out: &mut W,
@@ -830,6 +1088,7 @@ fn cut_fields_with_matcher<R: Read, W: Write, M: Matcher>(
     only_delimited: bool,
     newline_char: u8,
     out_delimiter: Option<&[u8]>,
+    long_line: Option<LongLineFields>,
 ) -> UResult<()> {
     match out_delimiter {
         Some(out_delim) => cut_fields_explicit_out_delim(
@@ -840,6 +1099,7 @@ fn cut_fields_with_matcher<R: Read, W: Write, M: Matcher>(
             only_delimited,
             newline_char,
             out_delim,
+            long_line,
         ),
         None => cut_fields_implicit_out_delim(
             reader,
@@ -848,6 +1108,7 @@ fn cut_fields_with_matcher<R: Read, W: Write, M: Matcher>(
             ranges,
             only_delimited,
             newline_char,
+            long_line,
         ),
     }
 }
@@ -883,6 +1144,13 @@ fn cut_fields<R: Read, W: Write>(
             field_opts.only_delimited,
             newline_char,
             opts.out_delimiter,
+            Some(LongLineFields::new(
+                ranges,
+                delim[0],
+                opts.out_delimiter.unwrap_or(delim),
+                field_opts.only_delimited,
+                newline_char,
+            )),
         ),
         Delimiter::Slice(delim) => cut_fields_with_matcher(
             reader,
@@ -892,6 +1160,7 @@ fn cut_fields<R: Read, W: Write>(
             field_opts.only_delimited,
             newline_char,
             opts.out_delimiter,
+            None,
         ),
         Delimiter::Whitespace => {
             let out_delim = opts.out_delimiter.unwrap_or(b"\t");
@@ -914,6 +1183,7 @@ fn cut_fields<R: Read, W: Write>(
                     field_opts.only_delimited,
                     newline_char,
                     out_delim,
+                    None,
                 )
             }
         }
