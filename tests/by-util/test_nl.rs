@@ -1057,3 +1057,19 @@ fn test_stdbuf_line_buffered_stdout() {
         .with_current_output()
         .stdout_only("     1\ta\n");
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.write("file", "a\n");
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" nl - file"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stdout_is("     1\ta\n")
+        .stderr_is("nl: -: Bad file descriptor\n");
+}
