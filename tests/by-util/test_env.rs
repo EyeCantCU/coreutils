@@ -2351,3 +2351,102 @@ env: no terminating quote in -S string at position 18 for quote '''
             .stderr_is("env: no terminating quote in -S string at position 18 for quote '''\n");
     }
 }
+
+#[test]
+fn test_quoting_style() {
+    // QUOTING_STYLE does not affect output that is not a terminal.
+    new_ucmd!()
+        .args(&["-i", "QUOTING_STYLE=c", "a b=c d", "e="])
+        .succeeds()
+        .stdout_only("QUOTING_STYLE=c\na b=c d\ne=\n");
+    for (style, expected) in [
+        ("literal", "a b=c d\ne=\n"),
+        ("shell", "'a b'='c d'\ne=''\n"),
+        ("shell-always", "'a b'='c d'\n'e'=''\n"),
+        ("c", "\"a b\"=\"c d\"\n\"e\"=\"\"\n"),
+    ] {
+        new_ucmd!()
+            .arg(format!("--quoting-style={style}"))
+            .args(&["-i", "a b=c d", "e="])
+            .succeeds()
+            .stdout_only(expected);
+    }
+    new_ucmd!()
+        .args(&["--quoting-style", "shell-escape", "-i", "a=\nb"])
+        .succeeds()
+        .stdout_only("a=''$'\\n''b'\n");
+    new_ucmd!()
+        .args(&["--quoting-style=bogus"])
+        .fails_with_code(125)
+        .no_stdout();
+}
+
+/// The environment dump shows the raw `environ`: duplicates and entries without `=` are kept.
+#[cfg(unix)]
+#[test]
+fn test_quoting_style_raw_environment_entries() {
+    use std::ffi::CString;
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    let scene = TestScenario::new(util_name!());
+    for (style, expected) in [
+        ("literal", "A=1 x\nA=2\nnoeq\n"),
+        ("shell-always", "'A'='1 x'\n'A'='2'\n'noeq'\n"),
+    ] {
+        let bin = CString::new(scene.bin_path.to_str().unwrap()).unwrap();
+        let args = [
+            bin.clone(),
+            CString::new("env").unwrap(),
+            CString::new(format!("--quoting-style={style}")).unwrap(),
+        ];
+        let envp = [
+            CString::new("A=1 x").unwrap(),
+            CString::new("A=2").unwrap(),
+            CString::new("noeq").unwrap(),
+        ];
+        let mut cmd = Command::new(&scene.bin_path);
+        // SAFETY: only execve is called in the forked child.
+        unsafe {
+            cmd.pre_exec(move || {
+                let argv: Vec<*const libc::c_char> = args
+                    .iter()
+                    .map(|a| a.as_ptr())
+                    .chain([std::ptr::null()])
+                    .collect();
+                let envv: Vec<*const libc::c_char> = envp
+                    .iter()
+                    .map(|a| a.as_ptr())
+                    .chain([std::ptr::null()])
+                    .collect();
+                libc::execve(bin.as_ptr(), argv.as_ptr(), envv.as_ptr());
+                Err(std::io::Error::last_os_error())
+            });
+        }
+        let output = cmd.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_quoting_style_terminal_default() {
+    // On a terminal QUOTING_STYLE picks the style (default shell-escape); -0 disables quoting.
+    new_ucmd!()
+        .args(&["-i", "a b=c d"])
+        .terminal_simulation(true)
+        .succeeds()
+        .stdout_is("'a b'='c d'\r\n");
+    new_ucmd!()
+        .env("QUOTING_STYLE", "c")
+        .args(&["-i", "a b=c d"])
+        .terminal_simulation(true)
+        .succeeds()
+        .stdout_is("\"a b\"=\"c d\"\r\n");
+    new_ucmd!()
+        .args(&["-i", "-0", "a b=c d"])
+        .terminal_simulation(true)
+        .succeeds()
+        .stdout_is("a b=c d\0");
+}
