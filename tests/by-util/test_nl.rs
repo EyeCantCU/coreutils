@@ -1088,3 +1088,32 @@ fn test_negative_line_increment_as_a_separate_argument() {
             .stdout_is("     1\ta\n     0\tb\n    -1\tc\n");
     }
 }
+
+#[test]
+#[cfg(unix)]
+fn test_stdbuf_line_buffered_stdout() {
+    // With `stdbuf -oL`, each line must be written while the input is still open.
+    let mut child = new_ucmd!()
+        .env("_STDBUF_O", "L")
+        .set_stdin(std::process::Stdio::piped())
+        .run_no_wait();
+    child.write_in("a\n");
+    child.delay(500);
+    child
+        .kill()
+        .make_assertion()
+        .with_current_output()
+        .stdout_only("     1\ta\n");
+}
+
+#[test]
+#[cfg(unix)]
+fn test_stdbuf_absurd_buffer_size_uses_default() {
+    // A size that cannot be allocated warns and falls back to default buffering.
+    new_ucmd!()
+        .env("_STDBUF_O", "18446744073709551615")
+        .pipe_in("a\n")
+        .succeeds()
+        .stdout_is("     1\ta\n")
+        .stderr_is("failed to allocate a 18446744073709551615 byte stdio buffer\n");
+}

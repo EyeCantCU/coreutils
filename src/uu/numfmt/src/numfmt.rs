@@ -19,7 +19,7 @@ use crate::options::{
 use crate::units::{Result, Unit};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, parser::ValueSource};
 use std::ffi::OsString;
-use std::io::{BufRead, BufWriter, IsTerminal, Write, stderr};
+use std::io::{BufRead, IsTerminal, Write, stderr};
 use std::str::FromStr;
 
 use uucore::display::Quotable;
@@ -134,7 +134,7 @@ fn with_stdout<T>(body: impl FnOnce(&mut dyn Write) -> UResult<T>) -> UResult<T>
         let mut writer = stdout.lock();
         finish(body(&mut writer), &mut writer)
     } else {
-        let mut writer = BufWriter::new(stdout.lock());
+        let mut writer = uucore::stdbuf::stdout_buf_writer(stdout.lock());
         finish(body(&mut writer), &mut writer)
     }
 }

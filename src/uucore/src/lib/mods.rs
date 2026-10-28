@@ -15,3 +15,4 @@ pub mod locale;
 pub mod os;
 pub mod panic;
 pub mod posix;
+pub mod stdbuf;
