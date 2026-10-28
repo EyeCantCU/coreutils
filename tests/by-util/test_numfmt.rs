@@ -6,7 +6,8 @@
 // spell-checker:ignore (paths) gnutest ronna quetta unitless
 
 use rstest::rstest;
-use uutests::new_ucmd;
+use uutests::util::TestScenario;
+use uutests::{at_and_ucmd, new_ucmd, util_name};
 
 #[test]
 fn test_invalid_arg() {
@@ -2144,4 +2145,29 @@ fn test_repeated_field_is_an_error() {
         .args(&["--field=1", "--field=1", "1000"])
         .fails_with_code(1)
         .stderr_only("numfmt: multiple field specifications\n");
+}
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // A stdin closed at startup is reported, not read as empty.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" numfmt"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("numfmt: error reading input: Bad file descriptor\n");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_read_error() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.mkdir("dir");
+    ucmd.set_stdin(std::fs::File::open(at.plus("dir")).unwrap())
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("numfmt: error reading input: Is a directory\n");
 }

@@ -55,6 +55,7 @@ numfmt-help-zero-terminated = le délimiteur de ligne est NUL, pas retour à la 
 
 # Messages d'erreur
 numfmt-error-unsupported-unit = Une unité non prise en charge est spécifiée
+numfmt-error-reading-input = erreur de lecture de l'entrée : { $error }
 numfmt-error-invalid-unit-size = taille d'unité invalide : { $size }
 numfmt-error-invalid-padding = valeur de remplissage invalide { $value }
 numfmt-error-invalid-header = valeur d'en-tête invalide { $value }
