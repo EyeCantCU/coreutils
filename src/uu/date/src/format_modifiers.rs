@@ -44,8 +44,8 @@ use uucore::translate;
 /// rejected as `FieldWidthTooLarge` instead of being handed to the allocator.
 /// A huge request (e.g. `%6666666666666D`) would otherwise abort the process
 /// under a sanitizer before `try_reserve` could fail gracefully, and OOM
-/// elsewhere.
-const MAX_FORMAT_WIDTH: usize = u16::MAX as usize;
+/// elsewhere. The caller streams the padding of wider fields.
+pub(crate) const MAX_FORMAT_WIDTH: usize = u16::MAX as usize;
 
 #[derive(Clone, Copy)]
 pub(super) enum Pad {
