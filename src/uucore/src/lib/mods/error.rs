@@ -444,6 +444,13 @@ impl Display for UIoError {
             // and we want to strip the "(os error X)" suffix.
             match self.inner.kind() {
                 NotFound => "No such file or directory",
+                // Rust maps both EACCES and EPERM to PermissionDenied, but
+                // EPERM reads "Operation not permitted" (EPERM is 1 on every
+                // supported Unix).
+                #[cfg(unix)]
+                PermissionDenied if self.inner.raw_os_error() == Some(1) => {
+                    "Operation not permitted"
+                }
                 PermissionDenied => "Permission denied",
                 ConnectionRefused => "Connection refused",
                 ConnectionReset => "Connection reset",
