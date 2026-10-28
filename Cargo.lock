@@ -3861,9 +3861,7 @@ version = "0.13.0"
 dependencies = [
  "clap",
  "fluent",
- "itertools 0.15.0",
  "memchr",
- "regex",
  "thiserror 2.0.21",
  "uucore",
 ]

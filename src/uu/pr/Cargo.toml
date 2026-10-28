@@ -19,9 +19,7 @@ doctest = false
 [dependencies]
 clap = { workspace = true }
 fluent = { workspace = true }
-itertools = { workspace = true }
 memchr = { workspace = true }
-regex = { workspace = true }
 thiserror = { workspace = true }
 uucore = { workspace = true, features = ["entries", "time"] }
 
