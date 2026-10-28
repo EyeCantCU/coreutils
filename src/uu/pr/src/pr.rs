@@ -1047,6 +1047,8 @@ fn build_options(
 /// If `name` is `"-"`, then read from stdin.
 fn read_to_end(name: &str) -> Result<Vec<u8>, PrError> {
     if name == "-" {
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        uucore::signals::ensure_stdin_open().map_err(PrError::Read)?;
         let mut f = stdin();
         let mut buf = vec![];
         f.read_to_end(&mut buf).map_err(PrError::Read)?;
