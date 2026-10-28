@@ -4,7 +4,7 @@
 // file that was distributed with this source code.
 
 // spell-checker:ignore AEDT AEST EEST NZDT NZST Kolkata Iseconds févr février janv janvier mercredi samedi sommes juin décembre Januar Juni Dezember enero junio diciembre gennaio giugno dicembre junho dezembro lundi dimanche Montag Sonntag Samstag sábado febr MEST MESZ KST uueuu ueuu vasárnap június január distros Wednes
-// spell-checker:ignore uppercases xffx
+// spell-checker:ignore uppercases xffx isdst timespec
 
 use std::cmp::Ordering;
 
@@ -3528,284 +3528,218 @@ fn test_date_format_modifier_edge_cases() {
     }
 }
 
-// Tests for --debug flag
+// Tests for --debug flag (expected output taken from GNU date)
 #[test]
 fn test_date_debug_basic() {
-    // Test that --debug outputs to stderr, not stdout
-    let result = new_ucmd!()
+    new_ucmd!()
         .env("TZ", "UTC")
+        .env("LC_ALL", "C")
         .args(&["--debug", "-d", "2005-01-01", "+%Y"])
-        .succeeds();
-
-    // Stdout should contain only the formatted date
-    assert_eq!(result.stdout_str().trim(), "2005");
-
-    // Stderr should contain debug information
-    let stderr = result.stderr_str();
-    assert!(stderr.contains("date: input string:"));
-    assert!(stderr.contains("date: parsed date part:"));
-    assert!(stderr.contains("date: parsed time part:"));
-    assert!(stderr.contains("date: input timezone:"));
-}
-
-#[test]
-fn test_date_debug_various_formats() {
-    // Test debug mode with various date formats and expected output
-    let test_cases = [
-        // (input, format, expected_stdout_contains, expected_stderr_contains, stderr_not_contains, check_input_string)
-        (
-            "2005-01-01 +345 day",
-            "+%Y-%m-%d",
-            "2005-12-12",
-            "date: parsed date part: (Y-M-D) 2005-12-12",
-            "",
-            true,
-        ),
-        (
-            "@0",
-            "+%Y-%m-%d",
-            "1970-01-01",
-            "date: parsed date part: (Y-M-D) 1970-01-01",
-            "warning: using midnight",
-            true,
-        ),
-        (
-            "@-22",
-            "+%s",
-            "-22",
-            "date: parsed date part: (Y-M-D) 1969-12-31",
-            "",
-            true,
-        ),
-        (
-            "2021-03-20 14:53:01 EST",
-            "+%Y-%m-%d",
-            "2021-03-20",
-            "date: parsed date part: (Y-M-D) 2021-03-20",
-            "",
-            true,
-        ),
-        (
-            "m9",
-            "+%T",
-            "21:00:00",
-            "date: parsed time part:",
-            "",
-            false,
-        ), // Military TZ is composed before parsing
-        (
-            " ",
-            "+%T",
-            "00:00:00",
-            "date: warning: using midnight",
-            "",
-            false,
-        ), // Whitespace is composed
-        (
-            "1 day ago",
-            "+%Y-%m-%d",
-            "",
-            "date: parsed date part: (Y-M-D)",
-            "",
-            true,
-        ),
-    ];
-
-    for (
-        input,
-        format,
-        stdout_contains,
-        stderr_contains,
-        stderr_not_contains,
-        check_input_string,
-    ) in test_cases
-    {
-        let result = new_ucmd!()
-            .env("TZ", "UTC")
-            .args(&["--debug", "-d", input, format])
-            .succeeds();
-
-        if !stdout_contains.is_empty() {
-            assert!(
-                result.stdout_str().contains(stdout_contains),
-                "For input '{input}': stdout should contain '{stdout_contains}', got: {}",
-                result.stdout_str()
-            );
-        }
-
-        let stderr = result.stderr_str();
-        assert!(
-            stderr.contains(stderr_contains),
-            "For input '{input}': stderr should contain '{stderr_contains}'"
+        .succeeds()
+        .stdout_is("2005\n")
+        .stderr_is(
+            "date: parsed date part: (Y-M-D) 2005-01-01\n\
+             date: input timezone: TZ=\"UTC\" environment value\n\
+             date: warning: using midnight as starting time: 00:00:00\n\
+             date: starting date/time: '(Y-M-D) 2005-01-01 00:00:00'\n\
+             date: '(Y-M-D) 2005-01-01 00:00:00' = 1104537600 epoch-seconds\n\
+             date: timezone: TZ=\"UTC\" environment value\n\
+             date: final: 1104537600.000000000 (epoch-seconds)\n\
+             date: final: (Y-M-D) 2005-01-01 00:00:00 (UTC)\n\
+             date: final: (Y-M-D) 2005-01-01 00:00:00 (UTC+00)\n\
+             date: output format: '%Y'\n",
         );
-
-        if check_input_string {
-            assert!(
-                stderr.contains(&format!("date: input string: {input}")),
-                "For input '{input}': stderr should contain input string"
-            );
-        } else {
-            // Just check that there is some input string
-            assert!(
-                stderr.contains("date: input string:"),
-                "For input '{input}': stderr should contain some input string"
-            );
-        }
-
-        if !stderr_not_contains.is_empty() {
-            assert!(
-                !stderr.contains(stderr_not_contains),
-                "For input '{input}': stderr should not contain '{stderr_not_contains}'"
-            );
-        }
-    }
 }
 
 #[test]
-fn test_date_debug_midnight_warnings() {
-    // Test midnight warning behavior with various inputs
-    let test_cases = [
-        // (input, format, should_warn)
-        ("2005-01-01", "+%Y", true), // No time specified
-        ("1997-01-19 08:17:48 +0", "+%Y-%m-%d", false), // Time specified
-        ("@0", "+%Y-%m-%d", false),  // Epoch format
-        (" ", "+%T", true),          // Whitespace (defaults to midnight)
-    ];
-
-    for (input, format, should_warn) in test_cases {
-        let result = new_ucmd!()
-            .env("TZ", "UTC")
-            .args(&["--debug", "-d", input, format])
-            .succeeds();
-
-        let stderr = result.stderr_str();
-        if should_warn {
-            assert!(
-                stderr.contains("date: warning: using midnight"),
-                "Input '{input}' should produce midnight warning"
-            );
-        } else {
-            assert!(
-                !stderr.contains("warning: using midnight"),
-                "Input '{input}' should not produce midnight warning"
-            );
-        }
-    }
+fn test_date_debug_relative_items_and_tz_rule() {
+    new_ucmd!()
+        .env("TZ", "America/Belize")
+        .env("LC_ALL", "C")
+        .args(&[
+            "--debug",
+            "-d",
+            "TZ=\"Asia/Tokyo\" Sun, 90-12-11 + 3 days - 90 minutes",
+            "+%F",
+        ])
+        .succeeds()
+        .stdout_is("1990-12-13\n")
+        .stderr_is(
+            "date: parsed day part: Sun (day ordinal=0 number=0)\n\
+             date: parsed date part: (Y-M-D) 0090-12-11\n\
+             date: parsed relative part: +3 day(s)\n\
+             date: parsed relative part: +3 day(s) -90 minutes\n\
+             date: input timezone: TZ=\"Asia/Tokyo\" in date string\n\
+             date: warning: adjusting year value 90 to 1990\n\
+             date: warning: using midnight as starting time: 00:00:00\n\
+             date: warning: day (Sun) ignored when explicit dates are given\n\
+             date: starting date/time: '(Y-M-D) 1990-12-11 00:00:00'\n\
+             date: warning: when adding relative days, it is recommended to specify noon\n\
+             date: after date adjustment (+0 years, +0 months, +3 days),\n\
+             date:     new date/time = '(Y-M-D) 1990-12-14 00:00:00'\n\
+             date: '(Y-M-D) 1990-12-14 00:00:00' = 661100400 epoch-seconds\n\
+             date: after time adjustment (+0 hours, -90 minutes, +0 seconds, +0 ns),\n\
+             date:     new time = 661095000 epoch-seconds\n\
+             date: timezone: TZ=\"Asia/Tokyo\" environment value\n\
+             date: final: 661095000.000000000 (epoch-seconds)\n\
+             date: final: (Y-M-D) 1990-12-13 13:30:00 (UTC)\n\
+             date: final: (Y-M-D) 1990-12-13 22:30:00 (UTC+09)\n\
+             date: output format: '%F'\n",
+        );
 }
 
 #[test]
-fn test_date_debug_without_flag() {
-    // Test that without --debug, no debug output appears
-    let result = new_ucmd!()
+fn test_date_debug_multiple_dates_option() {
+    new_ucmd!()
+        .env("LC_ALL", "C")
+        .args(&[
+            "-u",
+            "--debug",
+            "-d",
+            "discard",
+            "-d",
+            "2011-04-11 22:59",
+            "+%F",
+        ])
+        .succeeds()
+        .stdout_is("2011-04-11\n")
+        .stderr_is(
+            "date: only using last of multiple -d options\n\
+             date: parsed date part: (Y-M-D) 2011-04-11\n\
+             date: parsed time part: 22:59:00\n\
+             date: input timezone: TZ=\"UTC0\" environment value or -u\n\
+             date: using specified time as starting value: '22:59:00'\n\
+             date: starting date/time: '(Y-M-D) 2011-04-11 22:59:00'\n\
+             date: '(Y-M-D) 2011-04-11 22:59:00' = 1302562740 epoch-seconds\n\
+             date: timezone: Universal Time\n\
+             date: final: 1302562740.000000000 (epoch-seconds)\n\
+             date: final: (Y-M-D) 2011-04-11 22:59:00 (UTC)\n\
+             date: final: (Y-M-D) 2011-04-11 22:59:00 (UTC+00)\n\
+             date: output format: '%F'\n",
+        );
+}
+
+#[test]
+fn test_date_debug_month_shift_warning() {
+    new_ucmd!()
+        .env("LC_ALL", "C")
+        .args(&["-u", "--debug", "-d", "2016-10-31 - 1 month", "+%F"])
+        .succeeds()
+        .stdout_is("2016-10-01\n")
+        .stderr_contains(
+            "date: warning: month/year adjustment resulted in shifted dates:\n\
+             date:      adjusted Y M D: 2016 09 31\n\
+             date:    normalized Y M D: 2016 10 01\n",
+        );
+}
+
+#[test]
+fn test_date_debug_local_zone_dst() {
+    new_ucmd!()
+        .env("TZ", "America/New_York")
+        .env("LC_ALL", "C")
+        .args(&["--debug", "-d", "2016-06-01 EDT + 6 months", "+%F"])
+        .succeeds()
+        .stdout_is("2016-11-30\n")
+        .stderr_contains(
+            "date: parsed local_zone part: isdst=1\n\
+             date: parsed relative part: +6 month(s)\n\
+             date: input timezone: TZ=\"America/New_York\" environment value, dst\n",
+        )
+        .stderr_contains(
+            "date:     new date/time = '(Y-M-D) 2016-11-30 23:00:00'\n\
+             date: warning: daylight saving time changed after date adjustment\n",
+        );
+}
+
+#[test]
+fn test_date_debug_timespec() {
+    new_ucmd!()
+        .env("TZ", "America/Lima")
+        .env("LC_ALL", "C")
+        .args(&["--debug", "-d", "@1", "+%T"])
+        .succeeds()
+        .stdout_is("19:00:01\n")
+        .stderr_is(
+            "date: parsed number of seconds part: number of seconds: 1\n\
+             date: input timezone: '@timespec' - always UTC\n\
+             date: timezone: TZ=\"America/Lima\" environment value\n\
+             date: final: 1.000000000 (epoch-seconds)\n\
+             date: final: (Y-M-D) 1970-01-01 00:00:01 (UTC)\n\
+             date: final: (Y-M-D) 1969-12-31 19:00:01 (UTC-05)\n\
+             date: output format: '%T'\n",
+        );
+}
+
+#[test]
+fn test_date_debug_nonexistent_time() {
+    new_ucmd!()
         .env("TZ", "UTC")
-        .args(&["-d", "2005-01-01", "+%Y"])
-        .succeeds();
-
-    let stderr = result.stderr_str();
-    assert!(!stderr.contains("date: input string:"));
-    assert!(!stderr.contains("date: parsed date part:"));
+        .env("LC_ALL", "C")
+        .args(&[
+            "--debug",
+            "-d",
+            "TZ=\"America/Edmonton\" 2006-04-02 02:30:00",
+        ])
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is(
+            "date: parsed date part: (Y-M-D) 2006-04-02\n\
+             date: parsed time part: 02:30:00\n\
+             date: input timezone: TZ=\"America/Edmonton\" in date string\n\
+             date: using specified time as starting value: '02:30:00'\n\
+             date: error: invalid date/time value:\n\
+             date:     user provided time: '(Y-M-D) 2006-04-02 02:30:00'\n\
+             date:        normalized time: '(Y-M-D) 2006-04-02 03:30:00'\n\
+             date:                                             --\n\
+             date:      possible reasons:\n\
+             date:        nonexistent due to daylight-saving time;\n\
+             date:        invalid day/month combination;\n\
+             date:        missing timezone\n\
+             date: invalid date 'TZ=\"America/Edmonton\" 2006-04-02 02:30:00'\n",
+        );
 }
 
 #[test]
 fn test_date_debug_with_multiple_inputs() {
-    // Test debug mode with file and stdin input (multiple dates)
     let (at, mut ucmd) = at_and_ucmd!();
     let file = "debug_test_file";
-    at.write(file, "2005-01-01\n2006-02-02\n");
+    at.write(file, "2005-01-01\n@5\n");
 
     let result = ucmd
-        .env("TZ", "UTC")
-        .args(&["--debug", "-f", file, "+%Y"])
+        .env("LC_ALL", "C")
+        .args(&["-u", "--debug", "-f", file, "+%Y"])
         .succeeds();
-
-    assert_eq!(result.stdout_str(), "2005\n2006\n");
-
+    assert_eq!(result.stdout_str(), "2005\n1970\n");
     let stderr = result.stderr_str();
-    // Should show debug output for both lines
-    assert!(stderr.contains("date: input string: 2005-01-01"));
-    assert!(stderr.contains("date: input string: 2006-02-02"));
-    assert!(stderr.contains("date: parsed date part: (Y-M-D) 2005-01-01"));
-    assert!(stderr.contains("date: parsed date part: (Y-M-D) 2006-02-02"));
-
-    // Test with stdin
-    let result = new_ucmd!()
-        .env("TZ", "UTC")
-        .args(&["--debug", "-f", "-", "+%Y"])
-        .pipe_in("2005-01-01\n2006-02-02\n")
-        .succeeds();
-
-    assert_eq!(result.stdout_str(), "2005\n2006\n");
-    let stderr = result.stderr_str();
-    assert!(stderr.contains("date: input string: 2005-01-01"));
-    assert!(stderr.contains("date: input string: 2006-02-02"));
+    assert!(stderr.contains("date: parsed date part: (Y-M-D) 2005-01-01\n"));
+    assert!(stderr.contains("date: parsed number of seconds part: number of seconds: 5\n"));
+    assert_eq!(stderr.matches("date: output format: '%Y'\n").count(), 2);
 }
 
 #[test]
-fn test_date_debug_with_flags() {
-    // Test debug mode combined with other flags and exit codes
-    let test_cases = [
-        // (args, should_succeed, stdout_contains, stderr_contains)
-        (
-            vec!["--debug", "-d", "2005-01-01", "+%Y"],
-            true,
-            "2005",
-            "date: input string:",
-        ),
-        (
-            vec!["--debug", "-u", "-d", "2005-01-01", "+%Y-%m-%d %Z"],
-            true,
-            "UTC",
-            "date: parsed date part:",
-        ),
-        (
-            vec!["--debug", "-R", "-d", "2005-01-01"],
-            true,
-            "Sat, 01 Jan 2005",
-            "date: input string:",
-        ),
-        (
-            vec!["--debug", "-d", "invalid", "+%Y"],
-            false,
-            "",
-            "invalid date",
-        ),
-    ];
-
-    for (args, should_succeed, stdout_contains, stderr_contains) in test_cases {
-        let mut cmd = new_ucmd!();
-        cmd.env("TZ", "UTC").args(&args);
-
-        if should_succeed {
-            let result = cmd.succeeds();
-            assert!(
-                result.stdout_str().contains(stdout_contains),
-                "Args {args:?}: stdout should contain '{stdout_contains}'"
-            );
-            assert!(
-                result.stderr_str().contains(stderr_contains),
-                "Args {args:?}: stderr should contain '{stderr_contains}'"
-            );
-        } else {
-            let result = cmd.fails();
-            assert!(
-                result.stderr_str().contains(stderr_contains),
-                "Args {args:?}: stderr should contain '{stderr_contains}'"
-            );
-        }
-    }
+fn test_date_debug_without_flag() {
+    new_ucmd!()
+        .env("TZ", "UTC")
+        .args(&["-d", "2005-01-01", "+%Y"])
+        .succeeds()
+        .stdout_is("2005\n")
+        .no_stderr();
 }
 
 #[test]
 fn test_date_debug_current_time() {
-    // Test that debug mode without -d doesn't produce debug output (no parsing)
-    let result = new_ucmd!()
+    // Without -d nothing is parsed, so only the output format is shown
+    new_ucmd!()
         .env("TZ", "UTC")
         .args(&["--debug", "+%Y"])
-        .succeeds();
-
-    let stderr = result.stderr_str();
-    // No parsing happens for "now", so no debug output
-    assert_eq!(stderr, "");
+        .succeeds()
+        .stderr_is("date: output format: '%Y'\n");
+    new_ucmd!()
+        .env("TZ", "UTC")
+        .args(&["--debug", "-R"])
+        .succeeds()
+        .stderr_is("date: output format: '%a, %d %b %Y %H:%M:%S %z'\n");
 }
 
 #[test]
