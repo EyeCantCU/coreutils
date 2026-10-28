@@ -42,6 +42,7 @@ od-after-help = Affiche les données dans divers formats lisibles par l'homme. S
   le code de sortie sera non-zéro.
 
 # Messages d'erreur
+od-standard-input = entrée standard
 od-error-invalid-endian = Argument invalide --endian={$endian}
 od-error-invalid-inputs = Entrées invalides : {$msg}
 od-error-too-large = la valeur est trop grande
