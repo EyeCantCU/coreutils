@@ -958,7 +958,7 @@ impl EnvAppData {
 
         if do_debug_printing {
             let mut error = stderr().lock();
-            let _ = writeln!(error, "executing: {}", prog.maybe_quote());
+            let _ = writeln!(error, "executing: {}", prog.quote());
             let arg_prefix = "   arg";
             let _ = writeln!(error, "{arg_prefix}[{}]= {}", 0, arg0.quote());
             for (i, arg) in args.iter().enumerate() {
@@ -1391,7 +1391,7 @@ fn apply_change_directory(opts: &Options<'_>) -> Result<(), Box<dyn UError>> {
             Err(error) => {
                 return Err(USimpleError::new(
                     125,
-                    translate!("env-error-cannot-change-directory", "directory" => d.quote(), "error" => error),
+                    translate!("env-error-cannot-change-directory", "directory" => d.quote(), "error" => strip_errno(&error)),
                 ));
             }
         };

@@ -190,7 +190,7 @@ fn test_debug_1() {
         .succeeds();
     result.stderr_matches(
         &Regex::new(concat!(
-            r"executing: [^\n]+(\/|\\)coreutils(\.exe)?\n",
+            r"executing: '[^\n]+(\/|\\)coreutils(\.exe)?'\n",
             r"   arg\[0\]= '[^\n]+(\/|\\)coreutils(\.exe)?'\n",
             r"   arg\[1\]= 'echo'\n",
             r"   arg\[2\]= 'hello'"
@@ -217,7 +217,7 @@ fn test_debug_2() {
             r"arg\[2\]: '[^\n]+(\/|\\)coreutils(.exe)?'\n",
             r"arg\[3\]: 'echo'\n",
             r"arg\[4\]: 'hello2'\n",
-            r"executing: [^\n]+(\/|\\)coreutils(.exe)?\n",
+            r"executing: '[^\n]+(\/|\\)coreutils(.exe)?'\n",
             r"   arg\[0\]= '[^\n]+(\/|\\)coreutils(.exe)?'\n",
             r"   arg\[1\]= 'echo'\n",
             r"   arg\[2\]= 'hello2'"
@@ -239,7 +239,7 @@ fn test_debug1_part_of_string_arg() {
         .succeeds();
     result.stderr_matches(
         &Regex::new(concat!(
-            r"executing: [^\n]+(\/|\\)coreutils(\.exe)?\n",
+            r"executing: '[^\n]+(\/|\\)coreutils(\.exe)?'\n",
             r"   arg\[0\]= '[^\n]+(\/|\\)coreutils(\.exe)?'\n",
             r"   arg\[1\]= 'echo'\n",
             r"   arg\[2\]= 'hello1'"
@@ -266,7 +266,7 @@ fn test_debug2_part_of_string_arg() {
             r"arg\[2\]: '[^\n]+(\/|\\)coreutils(.exe)?'\n",
             r"arg\[3\]: 'echo'\n",
             r"arg\[4\]: 'hello2'\n",
-            r"executing: [^\n]+(\/|\\)coreutils(.exe)?\n",
+            r"executing: '[^\n]+(\/|\\)coreutils(.exe)?'\n",
             r"   arg\[0\]= '[^\n]+(\/|\\)coreutils(.exe)?'\n",
             r"   arg\[1\]= 'echo'\n",
             r"   arg\[2\]= 'hello2'"
@@ -505,9 +505,23 @@ fn test_fail_change_directory() {
         .arg("--chdir")
         .arg(some_non_existing_path)
         .arg("pwd")
-        .fails()
+        .fails_with_code(125)
         .stderr_move_str();
-    assert!(out.contains("env: cannot change directory to "));
+    assert!(out.starts_with("env: cannot change directory to 'some_nonexistent_path': "));
+    assert!(!out.contains("os error"));
+    #[cfg(unix)]
+    assert!(out.ends_with(": No such file or directory\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_debug_executing_is_quoted() {
+    new_ucmd!()
+        .args(&["-v", "-a", "short", "sh", "-c", "exit"])
+        .succeeds()
+        .stderr_is(
+            "argv0:     'short'\nexecuting: 'sh'\n   arg[0]= 'short'\n   arg[1]= '-c'\n   arg[2]= 'exit'\n",
+        );
 }
 
 #[test]
@@ -652,7 +666,7 @@ fn test_split_string_into_args_debug_output_whitespace_handling() {
     assert_eq!(
         out.stderr_str(),
         "input args:\narg[0]: 'env'\narg[1]: $\
-        '-vvS printf x%sx\\\\n A \\t B \\x0B\\x0C\\r\\n'\nexecuting: printf\
+        '-vvS printf x%sx\\\\n A \\t B \\x0B\\x0C\\r\\n'\nexecuting: 'printf'\
         \n   arg[0]= 'printf'\n   arg[1]= $'x%sx\\n'\n   arg[2]= 'A'\n   arg[3]= 'B'\n"
     );
 }
