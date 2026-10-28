@@ -462,13 +462,10 @@ impl Observer {
                             self.orphans.push(event_path.clone());
                         }
                     } else {
-                        show_error!(
-                            "{}: {}",
-                            display_name,
-                            translate!("tail-no-such-file-or-directory")
-                        );
-                        if !self.files.files_remaining() && self.use_polling {
-                            // NOTE: GNU's tail exits here for `---disable-inotify`
+                        if self.files.get(event_path).reader.is_some() {
+                            report_inaccessible(&display_name);
+                        }
+                        if !self.files.files_remaining() {
                             return Err(USimpleError::new(1, translate!("tail-no-files-remaining")));
                         }
                     }
