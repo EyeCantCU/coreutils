@@ -910,3 +910,18 @@ fn test_merge_prefix_lines(
     };
     cmd.args(&files).succeeds().stdout_only(expected);
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" comm - /dev/null"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("comm: -: Bad file descriptor\n");
+}
