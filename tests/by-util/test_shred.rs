@@ -3,7 +3,7 @@
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-// spell-checker:ignore wipesync
+// spell-checker:ignore wipesync rodir
 
 use uutests::at_and_ucmd;
 use uutests::new_ucmd;
@@ -225,7 +225,7 @@ fn test_shred_fail_no_perm() {
         .arg("-uv")
         .arg(path)
         .fails()
-        .stderr_contains("Couldn't rename to");
+        .stderr_contains("failed to remove: Permission denied");
 }
 
 #[test]
@@ -557,4 +557,50 @@ shred: invalid file size: '4vv'
             .fails_with_code(1)
             .stderr_is("shred: invalid file size: '4vv'\n");
     }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(wasi_runner, ignore = "WASI sandbox: host paths (/proc) not visible")]
+fn test_cannot_remove() {
+    new_ucmd!()
+        .args(&["-u", "/proc/self/mem"])
+        .fails_with_code(1)
+        // The unlink fails with EPERM, which uucore's error text renders as
+        // "Permission denied" in this release.
+        .stderr_contains("shred: /proc/self/mem: failed to remove: ");
+}
+
+#[test]
+#[cfg(unix)]
+fn test_fifo_invalid_file_type() {
+    // A FIFO without a reader must be rejected, not block waiting for one.
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.mkfifo("fifo");
+    ucmd.arg("fifo")
+        .timeout(std::time::Duration::from_secs(10))
+        .fails_with_code(1)
+        .stderr_only("shred: fifo: invalid file type\n");
+}
+
+#[test]
+#[cfg(unix)]
+fn test_remove_failure_still_deallocates() {
+    // When the file cannot be renamed or unlinked, its data must already be
+    // gone, and the failure reported once instead of on the first rename.
+    use std::os::unix::fs::PermissionsExt;
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.mkdir("rodir");
+    at.write("rodir/0123456789", "secret");
+    let dir_perms = |mode| std::fs::Permissions::from_mode(mode);
+    std::fs::set_permissions(at.plus("rodir"), dir_perms(0o555)).unwrap();
+    let result = ucmd.args(&["-u", "rodir/0123456789"]).run();
+    std::fs::set_permissions(at.plus("rodir"), dir_perms(0o755)).unwrap();
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    result
+        .failure()
+        .stderr_only("shred: rodir/0123456789: failed to remove: Permission denied\n");
+    assert_eq!(at.read("rodir/0123456789"), "");
 }
