@@ -3,7 +3,7 @@
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-// spell-checker:ignore (words) wipesync prefill couldnt fillpattern
+// spell-checker:ignore (words) wipesync prefill fillpattern
 
 use clap::{Arg, ArgAction, Command};
 #[cfg(unix)]
@@ -18,7 +18,7 @@ use std::os::unix::prelude::PermissionsExt;
 use std::path::{Path, PathBuf};
 use uucore::diagnostics::OptionValue;
 use uucore::display::Quotable;
-use uucore::error::{FromIo, UResult, USimpleError, UUsageError, strip_errno};
+use uucore::error::{FromIo, UResult, USimpleError, UUsageError};
 use uucore::parser::parse_size::parse_size_u64;
 use uucore::parser::shortcut_value_parser::ShortcutValueParser;
 use uucore::{format_usage, show_error, show_if_err};
@@ -663,51 +663,12 @@ fn wipe_file(
         }
     }
 
-    // On OpenBSD, /dev/fd/1 is a character device rather than a symlink.
-    // Get the metadata from stdout's file descriptor to inspect the actual file.
-    #[cfg(target_os = "openbsd")]
-    let get_metadata = || {
-        if is_stdout {
-            use std::{io::stdout, os::fd::AsFd};
-
-            stdout()
-                .as_fd()
-                .try_clone_to_owned()
-                .and_then(|fd| File::from(fd).metadata())
-        } else {
-            fs::metadata(path)
-        }
-    };
-
-    #[cfg(not(target_os = "openbsd"))]
-    let get_metadata = || fs::metadata(path);
-
-    // `Path::exists()` and `Path::is_file()` both collapse any metadata error
-    // (including a permission error) into `false`, which made shred report a
-    // file whose parent directory lacks search permission as "No such file or
-    // directory". Inspect the metadata directly so a genuine `ENOENT` stays a
-    // "no such file" error while a permission error falls through to the
-    // open-for-writing below, which surfaces the real reason.
-    match get_metadata() {
-        Ok(md) if !md.is_file() => {
-            return Err(USimpleError::new(
-                1,
-                translate_text!("shred-not-a-file", "file" => display_path.maybe_quote()),
-            ));
-        }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Err(USimpleError::new(
-                1,
-                translate_text!("shred-no-such-file-or-directory", "file" => display_path.maybe_quote()),
-            ));
-        }
-        _ => {}
-    }
-
-    let metadata = get_metadata().map_err_context(|| translate!("shred-failed-to-get-metadata"))?;
-
-    // If force is true, set file permissions to not-readonly.
-    if force && !is_stdout {
+    // If force is true, set file permissions to not-readonly. A file that
+    // cannot be looked up is left to the open below to report.
+    if force
+        && !is_stdout
+        && let Ok(metadata) = fs::metadata(path)
+    {
         let mut perms = metadata.permissions();
         #[cfg(unix)]
         #[allow(clippy::useless_conversion, clippy::unnecessary_cast)]
@@ -724,6 +685,62 @@ fn wipe_file(
         perms.set_readonly(false);
         fs::set_permissions(path, perms)
             .map_err_context(|| translate!("shred-failed-to-set-permissions"))?;
+    }
+
+    // Open first and inspect what was opened, so that the reported error is
+    // the one from opening the file. Opening without blocking means a FIFO
+    // with no reader fails (ENXIO) instead of hanging; it is then recognised
+    // by its type, and so is a FIFO that did have a reader.
+    let invalid_file_type = || {
+        USimpleError::new(
+            1,
+            translate_text!("shred-invalid-file-type", "file" => display_path.maybe_quote()),
+        )
+    };
+    let mut open_options = OpenOptions::new();
+    open_options.write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open_options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
+    }
+    let mut file = match open_options.open(path) {
+        Ok(file) => file,
+        Err(err) => {
+            if fs::metadata(path).is_ok_and(|md| is_fifo(&md)) {
+                return Err(invalid_file_type());
+            }
+            return Err(err.map_err_context(
+                || translate_text!("shred-failed-to-open-for-writing", "file" => display_path.maybe_quote()),
+            ));
+        }
+    };
+
+    let metadata = file
+        .metadata()
+        .map_err_context(|| translate!("shred-failed-to-get-metadata"))?;
+    if is_fifo(&metadata) {
+        return Err(invalid_file_type());
+    }
+    if !metadata.is_file() {
+        return Err(USimpleError::new(
+            1,
+            translate_text!("shred-not-a-file", "file" => display_path.maybe_quote()),
+        ));
+    }
+
+    // Writes to a regular file never block; restore normal blocking mode.
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: fcntl on a descriptor owned by `file` has no memory effects.
+        unsafe {
+            let fd = file.as_raw_fd();
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags != -1 {
+                libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+            }
+        }
     }
 
     // Fill up our pass sequence
@@ -752,13 +769,6 @@ fn wipe_file(
     }
 
     let total_passes = pass_sequence.len();
-    let mut file = OpenOptions::new()
-        .write(true)
-        .truncate(false)
-        .open(path)
-        .map_err_context(
-            || translate_text!("shred-failed-to-open-for-writing", "file" => display_path.maybe_quote()),
-        )?;
 
     let size = match size {
         Some(size) => size,
@@ -781,19 +791,31 @@ fn wipe_file(
     }
 
     if remove_method != RemoveMethod::None {
-        if is_stdout {
-            // Deallocate stdout's data for -u/--remove without renaming or
-            // unlinking the file that the descriptor refers to.
-            file.set_len(0).map_err_context(
-                || translate_text!("shred-failed-to-remove-file", "file" => display_path.maybe_quote()),
-            )?;
-        } else {
+        // Deallocate the data before touching the name, so the contents are
+        // gone even if renaming or unlinking fails. For stdout, the file that
+        // the descriptor refers to is not renamed or unlinked at all.
+        file.set_len(0).map_err_context(
+            || translate_text!("shred-failed-to-remove-file", "file" => display_path.maybe_quote()),
+        )?;
+        drop(file);
+        if !is_stdout {
             do_remove(path, verbose, remove_method).map_err_context(
                 || translate_text!("shred-failed-to-remove-file", "file" => display_path.maybe_quote()),
             )?;
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn is_fifo(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    metadata.file_type().is_fifo()
+}
+
+#[cfg(not(unix))]
+fn is_fifo(_metadata: &fs::Metadata) -> bool {
+    false
 }
 
 fn split_on_blocks(file_size: u64, exact: bool) -> (u64, u64) {
@@ -881,12 +903,12 @@ fn wipe_name(orig_path: &Path, verbose: bool, remove_method: RemoveMethod) -> Pa
                     last_path = new_path;
                     break;
                 }
-                Err(e) => {
-                    let msg = translate_text!("shred-couldnt-rename", "file" => last_path.maybe_quote(), "new_name" => new_path.quote(), "error" => strip_errno(&e));
-                    show_error!("{msg}");
-                    // TODO: replace with our error management
-                    std::process::exit(1);
-                }
+                // The name was taken in the meantime: try the next one.
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                // Any other failure would recur for every name of this
+                // length, so move on to a shorter one; the final unlink
+                // reports the file if it cannot be removed either.
+                Err(_) => break,
             }
         }
     }
