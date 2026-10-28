@@ -32,7 +32,7 @@ use std::ffi::OsString;
 use std::fs::Metadata;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 #[cfg(unix)]
 use std::os::unix::{
@@ -847,39 +847,72 @@ impl<'a> Output<'a> {
 
     /// Instantiate this struct with the named file as a destination.
     fn new_file(filename: &Path, settings: &'a Settings) -> UResult<Self> {
-        fn open_dst(path: &Path, cflags: &OConvFlags, oflags: &OFlags) -> Result<File, io::Error> {
+        fn open_dst(
+            path: &Path,
+            cflags: &OConvFlags,
+            oflags: &OFlags,
+            truncate: bool,
+        ) -> Result<File, io::Error> {
             let mut opts = OpenOptions::new();
             opts.write(true)
                 .create(!cflags.nocreat)
                 .create_new(cflags.excl)
                 .append(oflags.append);
 
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            if let Some(libc_flags) = make_linux_oflags(oflags) {
+            #[cfg(unix)]
+            {
+                #[cfg(any(target_os = "linux", target_os = "android"))]
+                let mut libc_flags = make_linux_oflags(oflags).unwrap_or(0);
+                #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                let mut libc_flags = 0;
+                // Passed as a raw flag because `OpenOptions` refuses to
+                // combine `truncate` with `append`.
+                if truncate {
+                    libc_flags |= libc::O_TRUNC;
+                }
                 opts.custom_flags(libc_flags);
             }
+            #[cfg(not(unix))]
+            let _ = truncate;
 
             opts.open(path)
         }
 
-        let dst = open_dst(filename, &settings.oconv, &settings.oflags).map_err_context(
-            || translate!("dd-error-failed-to-open", "path" => filename.quote()),
-        )?;
+        // Without a seek offset the file is emptied when it is opened, so no
+        // separate truncation is needed (it may not even be permitted).
+        let truncate_on_open = cfg!(unix) && !settings.oconv.notrunc && settings.seek == 0;
+        let dst = open_dst(
+            filename,
+            &settings.oconv,
+            &settings.oflags,
+            truncate_on_open,
+        )
+        .map_err_context(|| translate!("dd-error-failed-to-open", "path" => filename.quote()))?;
 
-        // Failures on special outputs such as `/dev/null` are ignored, as GNU does.
         if !settings.oconv.notrunc
+            && !truncate_on_open
             && let Err(e) = dst.set_len(settings.seek)
-            && dst.metadata().is_ok_and(|m| m.is_file())
         {
-            show_error!(
-                "{}",
-                e.map_err_context(|| translate!(
-                    "dd-error-failed-to-truncate",
-                    "size" => settings.seek,
-                    "file" => filename.quote()
-                ))
-            );
-            set_exit_code(1);
+            // Failures on special outputs such as `/dev/null` are ignored,
+            // as GNU does; that needs the file type, so failing to get it
+            // is fatal too.
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let is_file = rustix::fs::fstat(&dst)
+                .map(|st| rustix::fs::FileType::from_raw_mode(st.st_mode).is_file())
+                .map_err(io::Error::from);
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            let is_file = dst.metadata().map(|m| m.is_file());
+            if is_file.map_err_context(
+                || translate!("dd-error-cannot-fstat", "file" => filename.quote()),
+            )? {
+                return Err(e.map_err_context(|| {
+                    translate!(
+                        "dd-error-failed-to-truncate",
+                        "size" => settings.seek,
+                        "file" => filename.quote()
+                    )
+                }));
+            }
         }
 
         Self::prepare_file(dst, settings)

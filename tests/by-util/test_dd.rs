@@ -1547,28 +1547,51 @@ fn test_seekable_stdout_without_of_is_not_truncated() {
     assert!(out[1024..].iter().all(|&b| b == b'x'));
 }
 
-/// A failed truncate of the output names the file and the size, the copy
-/// still runs and prints its statistics, and the exit status is 1.
+/// A failed truncate of the output names the file and the size, and dd
+/// stops with exit status 1 before copying anything.
 #[test]
 #[cfg(target_os = "linux")]
-fn test_failed_truncate_is_reported_and_copy_goes_on() {
+fn test_failed_truncate_is_reported_and_copy_stops() {
     use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, ftruncate, memfd_create};
+    use std::os::unix::fs::FileExt;
 
     // A memfd sealed against shrinking: `ftruncate` to a smaller size fails
     // with EPERM, while writes inside the existing size still work.
     let fd = memfd_create("out", MemfdFlags::ALLOW_SEALING).unwrap();
     ftruncate(&fd, 2048).unwrap();
     fcntl_add_seals(&fd, SealFlags::SHRINK).unwrap();
+    let file = File::from(fd);
+    file.write_all_at(&[b'x'; 2048], 0).unwrap();
 
     new_ucmd!()
-        .args(&["bs=512", "count=1", "seek=1", "of=/dev/stdout"])
-        .pipe_in(vec![b'a'; 512])
+        .args(&["if=/dev/zero", "bs=512", "count=1", "seek=1", "of=/dev/stdout"])
+        .set_stdout(Stdio::from(file.try_clone().unwrap()))
+        .fails_with_code(1)
+        .stderr_only(
+            "dd: failed to truncate to 512 bytes in output file '/dev/stdout': Operation not permitted\n",
+        );
+
+    let mut buf = vec![0; 4096];
+    assert_eq!(file.read_at(&mut buf, 0).unwrap(), 2048);
+    assert!(buf[..2048].iter().all(|&b| b == b'x'));
+}
+
+/// Without `seek=`, the output is truncated when it is opened, so a file
+/// that cannot be truncated cannot be opened either.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_output_truncated_on_open() {
+    use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, ftruncate, memfd_create};
+
+    let fd = memfd_create("out", MemfdFlags::ALLOW_SEALING).unwrap();
+    ftruncate(&fd, 2048).unwrap();
+    fcntl_add_seals(&fd, SealFlags::SHRINK).unwrap();
+
+    new_ucmd!()
+        .args(&["if=/dev/zero", "bs=512", "count=1", "of=/dev/stdout"])
         .set_stdout(Stdio::from(File::from(fd)))
         .fails_with_code(1)
-        .stderr_contains(
-            "dd: failed to truncate to 512 bytes in output file '/dev/stdout': Operation not permitted\n",
-        )
-        .stderr_contains("1+0 records in\n1+0 records out\n");
+        .stderr_only("dd: failed to open '/dev/stdout': Operation not permitted\n");
 }
 
 /// Test that a seek on an output FIFO results in a read.
