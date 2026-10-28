@@ -1056,3 +1056,17 @@ fn test_last_of_check_order_nocheck_order_wins() {
         .fails_with_code(1)
         .stderr_is("join: a.txt:2: is not sorted: a\n");
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // A stdin closed at startup is reported, not read as empty.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" join - /dev/null"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_contains("Bad file descriptor");
+}
