@@ -242,12 +242,20 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     for file in &files {
         if file == "-" {
+            #[cfg(all(unix, not(target_os = "fuchsia")))]
+            if let Err(e) = uucore::signals::ensure_stdin_open() {
+                show_error!("{}", e.map_err_context(|| file.maybe_quote().to_string()));
+                set_exit_code(1);
+                continue;
+            }
             let mut buffer = BufReader::new(stdin());
-            nl(&mut buffer, &mut stats, &settings)?;
+            nl(&mut buffer, file, &mut stats, &settings)?;
         } else {
             let path = Path::new(file);
 
-            if path.is_dir() {
+            // Reading a directory fails with EISDIR on Linux, so let the read
+            // report it (or any other read error) there.
+            if cfg!(not(any(target_os = "linux", target_os = "android"))) && path.is_dir() {
                 show_error!(
                     "{}",
                     translate!("nl-error-is-directory", "path" => path.maybe_quote())
@@ -257,7 +265,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                 match File::open(path) {
                     Ok(reader) => {
                         let mut buffer = BufReader::new(reader);
-                        nl(&mut buffer, &mut stats, &settings)?;
+                        nl(&mut buffer, file, &mut stats, &settings)?;
                     }
                     Err(e) => {
                         show_error!("{}", e.map_err_context(|| file.maybe_quote().to_string()));
@@ -387,7 +395,12 @@ fn write_line(writer: &mut impl Write, line: &[u8]) -> io::Result<()> {
 }
 
 /// `nl` implements the main functionality for an individual buffer.
-fn nl<T: Read>(reader: &mut BufReader<T>, stats: &mut Stats, settings: &Settings) -> UResult<()> {
+fn nl<T: Read>(
+    reader: &mut BufReader<T>,
+    name: &OsStr,
+    stats: &mut Stats,
+    settings: &Settings,
+) -> UResult<()> {
     let mut writer = uucore::stdbuf::stdout_buf_writer(stdout());
     let mut current_numbering_style = &settings.body_numbering;
     let mut line = Vec::new();
@@ -403,10 +416,7 @@ fn nl<T: Read>(reader: &mut BufReader<T>, stats: &mut Stats, settings: &Settings
             Ok(0) => break,
             Ok(bytes_read) => bytes_read,
             Err(err) => {
-                show_error!(
-                    "{}",
-                    err.map_err_context(|| translate!("nl-error-could-not-read-line"))
-                );
+                show_error!("{}", err.map_err_context(|| name.maybe_quote().to_string()));
                 set_exit_code(1);
                 break;
             }
