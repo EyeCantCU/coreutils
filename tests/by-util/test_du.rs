@@ -2981,3 +2981,23 @@ fn test_files0_from_write_error() {
         .fails_with_code(1)
         .stderr_is("du: No space left on device\n");
 }
+
+/// `--max-depth=0` with `--summarize` only warns; another depth conflicts.
+#[test]
+#[cfg(unix)]
+fn test_summarize_with_max_depth() {
+    new_ucmd!()
+        .args(&["--max-depth=0", "--summarize", "/dev/null"])
+        .succeeds()
+        .stdout_is("0\t/dev/null\n")
+        .stderr_is("du: warning: summarizing is the same as using --max-depth=0\n");
+    new_ucmd!()
+        .args(&["-s", "-d", "1", "/dev/null"])
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_contains("summarizing conflicts with --max-depth=1");
+    new_ucmd!()
+        .args(&["-s", "-d", "x", "/dev/null"])
+        .fails_with_code(1)
+        .stderr_contains("invalid maximum depth");
+}
