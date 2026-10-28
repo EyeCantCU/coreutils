@@ -1088,3 +1088,43 @@ fn test_negative_line_increment_as_a_separate_argument() {
             .stdout_is("     1\ta\n     0\tb\n    -1\tc\n");
     }
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // A stdin closed at startup is reported, not read as empty.
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.write("file", "a\n");
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" nl - file"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stdout_is("     1\ta\n")
+        .stderr_is("nl: -: Bad file descriptor\n");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_read_errors() {
+    // Read errors name the input; an unopenable directory gives the open error.
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.mkdir("dir");
+    scene
+        .ucmd()
+        .arg("-")
+        .set_stdin(std::fs::File::open(scene.fixtures.plus("dir")).unwrap())
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("nl: -: Is a directory\n");
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    scene.fixtures.set_mode("dir", 0o000);
+    scene
+        .ucmd()
+        .arg("dir")
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("nl: dir: Permission denied\n");
+}

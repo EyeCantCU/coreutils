@@ -29,7 +29,6 @@ nl-help-number-width = use NUMBER columns for line numbers
 
 # Error messages
 nl-error-invalid-arguments = Invalid arguments supplied.
-nl-error-could-not-read-line = could not read line
 nl-error-could-not-write = could not write output
 nl-error-line-number-overflow = line number overflow
 nl-error-invalid-regex = invalid regular expression
