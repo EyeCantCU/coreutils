@@ -9,8 +9,9 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use itertools::Itertools;
 use regex::Regex;
 use std::ffi::OsStr;
+use std::fs::File;
 use std::fs::metadata;
-use std::io::{self, Read, Write, stderr, stdin, stdout};
+use std::io::{self, BufRead, BufReader, Read, Write, stderr, stdin, stdout};
 use std::num::IntErrorKind;
 use std::path::PathBuf;
 use std::str::Utf8Error;
@@ -1079,6 +1080,10 @@ fn apply_expand_tab(chunk: &mut Vec<u8>, byte: u8, expand_options: &ExpandTabsOp
 }
 
 fn pr(name: &str, options: &OutputOptions) -> Result<i32, PrError> {
+    if options.merge_files_print.is_none() && get_columns(options) == 1 {
+        return pr_single_column(name, options);
+    }
+
     // Read the entire contents of the file into a buffer.
     //
     // TODO Read incrementally.
@@ -1105,6 +1110,154 @@ fn pr(name: &str, options: &OutputOptions) -> Result<i32, PrError> {
         write_page(&mut writer, &page, options, page_number).map_err(PrError::Write)?;
     }
 
+    Ok(0)
+}
+
+/// Lays out single-column pages one line at a time, the same way as
+/// [`write_page`] lays out a complete page.
+struct SingleColumnPager<'a, W: Write> {
+    options: &'a OutputOptions,
+    writer: W,
+    /// Lines that fit on a page.
+    rows: usize,
+    page_num: usize,
+    line_num: usize,
+    lines_on_page: usize,
+    header_written: bool,
+}
+
+impl<W: Write> SingleColumnPager<'_, W> {
+    fn page_in_range(&self) -> bool {
+        self.options.start_page <= self.page_num + 1
+            && self.options.end_page.is_none_or(|e| self.page_num < e)
+    }
+
+    fn write_header_once(&mut self) -> io::Result<()> {
+        if !self.header_written {
+            write_page_header(&mut self.writer, self.options, self.page_num + 1)?;
+            self.header_written = true;
+        }
+        Ok(())
+    }
+
+    /// Add a line to the current page, ending the page when it is full.
+    fn line(&mut self, content: &[u8], newline_terminated: bool) -> io::Result<()> {
+        if self.page_in_range() {
+            self.write_header_once()?;
+            if self.lines_on_page < self.rows {
+                let options = self.options;
+                let line = FileLine::from_buf(0, self.page_num, self.line_num, content, options);
+                write_offset_spaces(&mut self.writer, options.offset_spaces)?;
+                self.writer.write_all(
+                    get_line_for_printing(options, &line, 1, 0, options.line_width, 1).as_bytes(),
+                )?;
+                self.writer
+                    .write_all(options.content_line_separator.as_bytes())?;
+            }
+        }
+        self.lines_on_page += 1;
+        if newline_terminated {
+            self.line_num += 1;
+            if self.lines_on_page >= self.rows {
+                self.end_page()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn end_page(&mut self) -> io::Result<()> {
+        if self.page_in_range() {
+            self.write_header_once()?;
+            let options = self.options;
+            if options.display_header_and_trailer && !options.form_feed_used {
+                for _ in self.lines_on_page..self.rows {
+                    self.writer
+                        .write_all(options.content_line_separator.as_bytes())?;
+                }
+            }
+            write_page_trailer(&mut self.writer, options)?;
+        }
+        self.page_num += 1;
+        self.lines_on_page = 0;
+        self.header_written = false;
+        Ok(())
+    }
+}
+
+/// Paginate a single-column file while reading it, writing each line as soon
+/// as it has been read, so that output keeps up with input arriving slowly.
+///
+/// The input is split into lines and pages the same way as by [`get_pages`].
+fn pr_single_column(name: &str, options: &OutputOptions) -> Result<i32, PrError> {
+    let read_error = |error| {
+        if name == "-" {
+            PrError::Read(error)
+        } else {
+            PrError::ReadPath {
+                path: PathBuf::from(name),
+                error,
+            }
+        }
+    };
+    let mut reader: Box<dyn BufRead> = if name == "-" {
+        Box::new(stdin().lock())
+    } else {
+        Box::new(BufReader::new(File::open(name).map_err(read_error)?))
+    };
+    let mut pager = SingleColumnPager {
+        options,
+        writer: stdout().lock(),
+        rows: lines_to_read_for_page(options),
+        page_num: 0,
+        line_num: get_start_line_number(options),
+        lines_on_page: 0,
+        header_written: false,
+    };
+
+    let mut prev_delimiter = None;
+    let mut chunk = Vec::new();
+    loop {
+        chunk.clear();
+        if reader.read_until(NL, &mut chunk).map_err(read_error)? == 0 {
+            break;
+        }
+        let mut start = 0;
+        for i in memchr::memchr2_iter(FF, NL, &chunk) {
+            let delimiter = chunk[i];
+            // An empty line between a newline and a form feed, in either
+            // order, is not a line of its own.
+            let other = if delimiter == FF { NL } else { FF };
+            if !(i == start && prev_delimiter == Some(other)) {
+                pager
+                    .line(&chunk[start..i], delimiter == NL)
+                    .map_err(PrError::Write)?;
+            }
+            if delimiter == FF {
+                pager.end_page().map_err(PrError::Write)?;
+            }
+            start = i + 1;
+            prev_delimiter = Some(delimiter);
+        }
+        // Bytes after the last delimiter can only come at the end of the input.
+        if start < chunk.len() {
+            pager.line(&chunk[start..], false).map_err(PrError::Write)?;
+        }
+    }
+    let page_count = pager.page_num + 1;
+    if pager.lines_on_page > 0 {
+        pager.end_page().map_err(PrError::Write)?;
+    }
+
+    if options.start_page > page_count {
+        show_error!(
+            "{}",
+            translate!(
+                "pr-error-starting-page-exceeds-page-count",
+                "start" => options.start_page,
+                "count" => page_count
+            )
+        );
+    }
     Ok(0)
 }
 
@@ -1311,19 +1464,27 @@ fn write_page(
     options: &OutputOptions,
     page: usize,
 ) -> io::Result<()> {
+    write_page_header(writer, options, page)?;
+    write_columns(writer, lines, options)?;
+    write_page_trailer(writer, options)
+}
+
+fn write_page_header(
+    writer: &mut impl Write,
+    options: &OutputOptions,
+    page: usize,
+) -> io::Result<()> {
+    for x in header_content(options, page) {
+        writer.write_all(x.as_bytes())?;
+        writer.write_all(options.line_separator.as_bytes())?;
+    }
+    Ok(())
+}
+
+fn write_page_trailer(writer: &mut impl Write, options: &OutputOptions) -> io::Result<()> {
     let line_separator = options.line_separator.as_bytes();
     let page_separator = options.page_separator_char.as_bytes();
-
-    let header = header_content(options, page);
     let trailer_content = trailer_content(options);
-
-    for x in header {
-        writer.write_all(x.as_bytes())?;
-        writer.write_all(line_separator)?;
-    }
-
-    write_columns(writer, lines, options)?;
-
     for (index, x) in trailer_content.iter().enumerate() {
         writer.write_all(x.as_bytes())?;
         if index + 1 != trailer_content.len() {

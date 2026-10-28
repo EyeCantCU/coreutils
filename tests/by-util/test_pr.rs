@@ -1352,3 +1352,21 @@ fn test_missing_file_error_message() {
         .stderr_contains("pr: nonexistent_file: ")
         .stderr_does_not_contain("(os error");
 }
+
+#[test]
+#[cfg(unix)]
+fn test_single_column_output_before_end_of_input() {
+    // Each line must be written as soon as it has been read, not once the
+    // whole input has been read.
+    let mut child = new_ucmd!()
+        .args(&["-t", "-n"])
+        .set_stdin(std::process::Stdio::piped())
+        .run_no_wait();
+    child.write_in("1\n");
+    child.delay(500);
+    child
+        .kill()
+        .make_assertion()
+        .with_current_output()
+        .stdout_only("    1\t1\n");
+}
