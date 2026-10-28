@@ -5621,3 +5621,25 @@ fn test_invalid_count_keeps_its_leading_zeros() {
         .fails_with_code(1)
         .stderr_is("tail: invalid number of bytes: '0fb'\n");
 }
+
+#[rstest]
+#[case::lines("-n+1", "a\nb\n")]
+#[case::bytes("-c+1", "a\nb\n")]
+#[case::skip_lines("-n+2", "b\n")]
+#[cfg(unix)]
+fn test_stdbuf_line_buffered_stdout(#[case] arg: &str, #[case] expected: &str) {
+    // `stdbuf -oL` requests line buffered stdout through `_STDBUF_O`: the
+    // lines must then be written while the input pipe is still open.
+    let mut child = new_ucmd!()
+        .arg(arg)
+        .env("_STDBUF_O", "L")
+        .set_stdin(Stdio::piped())
+        .run_no_wait();
+    child.write_in("a\nb\n");
+    child.delay(500);
+    child
+        .kill()
+        .make_assertion()
+        .with_current_output()
+        .stdout_only(expected);
+}
