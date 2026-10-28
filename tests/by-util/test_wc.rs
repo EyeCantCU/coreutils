@@ -811,3 +811,14 @@ fn test_closed_stdin() {
         .stdout_is("0 -\n")
         .stderr_contains("Bad file descriptor");
 }
+
+/// A `--debug` message that cannot be written to stderr makes `wc` fail.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_debug_unwritable_stderr() {
+    new_ucmd!()
+        .args(&["-l", "--debug", "/dev/null"])
+        .set_stderr(std::fs::File::create("/dev/full").unwrap())
+        .fails_with_code(1)
+        .stdout_is("0 /dev/null\n");
+}
