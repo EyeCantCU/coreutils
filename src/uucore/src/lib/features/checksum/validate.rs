@@ -746,12 +746,13 @@ fn compute_and_check_digest_from_file(
                     err.map_err_context(|| { locale_aware_shell_escape(real_filename_to_check) })
                 );
 
-                let _ = write_file_report(
+                write_file_report(
                     io::stdout(),
                     real_filename_to_check,
                     FileChecksumResult::CantOpen,
                     opts.verbose,
-                );
+                )
+                .map_err(ChecksumError::Write)?;
                 return Err(LineCheckError::CantOpenFile);
             }
         };
@@ -762,12 +763,13 @@ fn compute_and_check_digest_from_file(
         DigestOutput::Crc(n) => n.to_be_bytes() == expected_checksum,
         DigestOutput::U16(n) => n.to_be_bytes() == expected_checksum,
     };
-    let _ = write_file_report(
+    write_file_report(
         io::stdout(),
         real_filename_to_check,
         FileChecksumResult::from_bool(checksum_correct),
         opts.verbose,
-    );
+    )
+    .map_err(ChecksumError::Write)?;
 
     if checksum_correct {
         Ok(())
