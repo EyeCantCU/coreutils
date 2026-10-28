@@ -3,7 +3,7 @@
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-// spell-checker:ignore (words) dirfd subdirs openat FDCWD rwxr
+// spell-checker:ignore (words) dirfd subdirs openat FDCWD rwxr fchmodat
 
 use std::fs::{OpenOptions, Permissions, metadata, set_permissions};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -2201,4 +2201,59 @@ fn test_chmod_changes_does_not_report_inaccessible_operand() {
         .fails_with_code(1)
         .no_stdout()
         .stderr_is("chmod: cannot access 'missing': No such file or directory\n");
+}
+
+/// Under `-R`, an entry vanishing before its chmod is skipped silently; other errors are reported.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_chmod_recursive_entry_vanished() {
+    use std::process::Command;
+
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.mkdir("d");
+    scene.fixtures.touch("d/foo");
+
+    let run = |errno: &str| {
+        Command::new("strace")
+            .args(["--quiet=all", "-o", "/dev/null", "-P", "foo", "-e"])
+            .arg(format!("inject=chmod,fchmodat,fchmodat2:error={errno}"))
+            .arg(&scene.bin_path)
+            .arg(scene.util_name.as_str())
+            .args(["-R", "0700", "."])
+            .current_dir(scene.fixtures.plus("d"))
+            .output()
+            .ok()
+    };
+
+    // Skip when strace (or its fault injection) is unavailable.
+    let Some(output) = run("EIO").filter(|o| o.status.code() == Some(1)) else {
+        return;
+    };
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "chmod: changing permissions of './foo': Input/output error\n"
+    );
+
+    let output = run("ENOENT").unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+/// Under `-R -L`, a dangling symlink is reported, unlike an entry that has vanished.
+#[test]
+#[cfg(unix)]
+fn test_chmod_recursive_follow_dangling_symlink() {
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.mkdir("d");
+    scene.fixtures.symlink_file("nonexistent", "d/dang");
+    scene
+        .ucmd()
+        .args(&["-RL", "+x", "d"])
+        .fails_with_code(1)
+        .stderr_is("chmod: cannot operate on dangling symlink 'd/dang'\n");
+    scene
+        .ucmd()
+        .args(&["-RH", "+x", "d"])
+        .succeeds()
+        .no_output();
 }

@@ -719,10 +719,23 @@ impl Chmoder {
 
             let meta = match dir_fd.metadata_at(&entry_name, should_follow_symlink.into()) {
                 Ok(meta) => meta,
+                // Removed after the directory was read: nothing left to change.
+                // A dangling symlink that is followed is still reported.
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::NotFound
+                        && dir_fd
+                            .metadata_at(&entry_name, SymlinkBehavior::NoFollow)
+                            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    continue;
+                }
                 Err(err) => {
                     // Handle permission denied with proper file path context
                     let error = if err.kind() == std::io::ErrorKind::PermissionDenied {
                         ChmodError::PermissionDenied(entry_path).into()
+                    } else if err.kind() == std::io::ErrorKind::NotFound {
+                        // Only a followed dangling symlink gets here.
+                        ChmodError::DanglingSymlink(entry_path).into()
                     } else {
                         err.into()
                     };
@@ -838,6 +851,10 @@ impl Chmoder {
 
         // Use safe traversal to change the mode
         if let Err(e) = dir_fd.chmod_at(entry_name, new_mode, symlink_behavior) {
+            // Likewise for an entry that vanished before it could be changed.
+            if e.kind() == std::io::ErrorKind::NotFound {
+                return Ok(());
+            }
             if self.verbose {
                 println!(
                     "failed to change mode of {} to {new_mode:o}",
@@ -845,13 +862,7 @@ impl Chmoder {
                 );
             }
 
-            return Err(match e.kind() {
-                std::io::ErrorKind::ReadOnlyFilesystem => {
-                    ChmodError::ChangingPermissions(file_path.into(), e)
-                }
-                _ => ChmodError::PermissionDenied(file_path.into()),
-            }
-            .into());
+            return Err(ChmodError::ChangingPermissions(file_path.into(), e).into());
         }
 
         // Report the change using the helper method
