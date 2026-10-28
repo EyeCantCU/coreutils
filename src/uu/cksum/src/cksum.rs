@@ -5,8 +5,6 @@
 
 // spell-checker:ignore (ToDO) fname, algo, bitlen
 
-use std::io::{Write, stderr};
-
 use clap::Command;
 use uu_checksum_common::{ChecksumCommand, checksum_main, default_checksum_app, options};
 
@@ -25,9 +23,9 @@ use uucore::translate;
 fn print_cpu_debug_info() {
     fn print_feature(name: &str, available: bool) {
         if available {
-            let _ = writeln!(stderr(), "using {name} hardware support");
+            uucore::show_error!("using {name} hardware support");
         } else {
-            let _ = writeln!(stderr(), "{name} support not detected");
+            uucore::show_error!("{name} support not detected");
         }
     }
 

@@ -60,7 +60,7 @@ use std::{
     error::Error,
     fmt::{Display, Formatter},
     io::Write,
-    sync::atomic::{AtomicI32, Ordering},
+    sync::atomic::{AtomicBool, AtomicI32, Ordering},
 };
 
 static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
@@ -92,6 +92,33 @@ pub fn get_exit_code() -> i32 {
 /// ```
 pub fn set_exit_code(code: i32) {
     EXIT_CODE.store(code, Ordering::SeqCst);
+}
+
+static STDERR_WRITE_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Write `text` to stderr at once.
+///
+/// A diagnostic that cannot be written is lost, so if the write fails, a
+/// utility that would otherwise succeed exits with status 1 (see
+/// [`stderr_write_failed`] for utilities that use another failure status).
+pub fn write_stderr(text: &str) {
+    if std::io::stderr().write_all(text.as_bytes()).is_err() {
+        STDERR_WRITE_FAILED.store(true, Ordering::SeqCst);
+        let _ = EXIT_CODE.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst);
+    }
+}
+
+/// Whether a write by [`write_stderr`] (or [`crate::show!`] and friends) failed.
+pub fn stderr_write_failed() -> bool {
+    STDERR_WRITE_FAILED.load(Ordering::SeqCst)
+}
+
+/// Print `<util>: <prefix><msg>` to stderr, used by [`crate::show!`] and friends.
+///
+/// stderr is unbuffered, so the line is formatted first and written at once.
+#[doc(hidden)]
+pub fn print_diagnostic(prefix: &str, msg: std::fmt::Arguments<'_>) {
+    write_stderr(&format!("{}: {prefix}{msg}\n", crate::util_name()));
 }
 
 /// Result type that should be returned by all utils.

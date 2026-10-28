@@ -3120,6 +3120,21 @@ mod debug_flag {
             });
     }
 
+    /// The --debug lines are diagnostics: they carry the program name, and
+    /// failing to write them makes the exit status a failure.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_debug_unwritable_stderr() {
+        new_ucmd!()
+            .args(&["--debug", "/dev/null"])
+            .succeeds()
+            .stderr_contains("cksum: ");
+        new_ucmd!()
+            .args(&["--debug", "/dev/null"])
+            .set_stderr(std::fs::File::create("/dev/full").unwrap())
+            .fails_with_code(1);
+    }
+
     #[test]
     fn test_debug_with_algorithms() {
         // Test with SHA256 - CPU detection should be same regardless of algorithm
