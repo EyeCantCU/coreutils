@@ -648,3 +648,32 @@ fn test_fmt_anti_prefix_keeps_missing_final_newline() {
             .stdout_only(expected);
     }
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = uutests::util::TestScenario::new(uutests::util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" fmt -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("fmt: read error: Bad file descriptor\n");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_read_error_continues_with_next_file() {
+    let (at, mut ucmd) = uutests::at_and_ucmd!();
+    at.mkdir("dir");
+    at.write("file", "a\n");
+    ucmd.args(&["dir", "file", "dir"])
+        .fails_with_code(1)
+        .stdout_is("a\n")
+        .stderr_is(
+            "fmt: error reading 'dir': Is a directory\nfmt: error reading 'dir': Is a directory\n",
+        );
+}

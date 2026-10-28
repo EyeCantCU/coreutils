@@ -6,13 +6,14 @@
 // spell-checker:ignore (ToDO) PSKIP linebreak ostream parasplit tabwidth xanti xprefix
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Stdout, Write, stdin, stdout};
 use std::path::Path;
 use uucore::display::Quotable;
 use uucore::error::{FromIo, UResult, USimpleError};
-use uucore::translate;
+use uucore::{show, translate};
 
 use uucore::format_usage;
 
@@ -207,17 +208,25 @@ fn process_file(
     ostream: &mut BufWriter<Stdout>,
 ) -> UResult<()> {
     let mut fp = BufReader::new(if file_name == "-" {
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        if let Err(e) = uucore::signals::ensure_stdin_open() {
+            show!(e.map_err_context(|| translate!("fmt-error-read")));
+            return Ok(());
+        }
         Box::new(stdin()) as Box<dyn Read + 'static>
     } else {
         let path = Path::new(file_name);
         let f = File::open(path).map_err_context(
             || translate!("fmt-error-cannot-open-for-reading", "file" => path.quote()),
         )?;
-        if f.metadata()
-            .map_err_context(
-                || translate!("fmt-error-cannot-get-metadata", "file" => path.quote()),
-            )?
-            .is_dir()
+        // Reading a directory fails with EISDIR on Linux, so let the read
+        // report it (or any other read error) there.
+        if cfg!(not(any(target_os = "linux", target_os = "android")))
+            && f.metadata()
+                .map_err_context(
+                    || translate!("fmt-error-cannot-get-metadata", "file" => path.quote()),
+                )?
+                .is_dir()
         {
             return Err(FmtError::ReadError.into());
         }
@@ -225,7 +234,8 @@ fn process_file(
         Box::new(f) as Box<dyn Read + 'static>
     });
 
-    let p_stream = ParagraphStream::new(fmt_opts, &mut fp);
+    let read_error = Cell::new(None);
+    let p_stream = ParagraphStream::new(fmt_opts, &mut fp, &read_error);
     for para_result in p_stream {
         match para_result {
             Err(nfl) => {
@@ -247,6 +257,15 @@ fn process_file(
     ostream
         .flush()
         .map_err_context(|| translate!("fmt-error-failed-to-write-output"))?;
+
+    // A read error only ends this input; carry on with the next one.
+    if let Some(e) = read_error.take() {
+        show!(e.map_err_context(|| if file_name == "-" {
+            translate!("fmt-error-read")
+        } else {
+            translate!("fmt-error-reading", "file" => file_name.quote())
+        }));
+    }
 
     Ok(())
 }
@@ -575,6 +594,7 @@ mod tests {
     #[test]
     fn preserve_equals_before_non_utf8_prefix() {
         use super::preserve_prefix_equals;
+        use std::cell::Cell;
         use std::ffi::OsString;
         use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
