@@ -283,3 +283,17 @@ fn test_file_with_non_utf8_name() {
         .succeeds()
         .stdout_is("Zm9v\n");
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // A stdin closed at startup is reported, not read as empty.
+    let scene = uutests::util::TestScenario::new(uutests::util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" basenc --base64 -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("basenc: read error: Bad file descriptor\n");
+}
