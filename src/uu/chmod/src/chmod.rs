@@ -717,6 +717,9 @@ impl Chmoder {
 
             let meta = match dir_fd.metadata_at(&entry_name, should_follow_symlink.into()) {
                 Ok(meta) => meta,
+                // The entry was removed after the directory was read: there is
+                // nothing left to change, so this is not an error.
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(err) => {
                     // Handle permission denied with proper file path context
                     let error = if err.kind() == std::io::ErrorKind::PermissionDenied {
@@ -836,6 +839,10 @@ impl Chmoder {
 
         // Use safe traversal to change the mode
         if let Err(e) = dir_fd.chmod_at(entry_name, new_mode, symlink_behavior) {
+            // Likewise for an entry that vanished before it could be changed.
+            if e.kind() == std::io::ErrorKind::NotFound {
+                return Ok(());
+            }
             if self.verbose {
                 println!(
                     "failed to change mode of {} to {new_mode:o}",
@@ -843,13 +850,7 @@ impl Chmoder {
                 );
             }
 
-            return Err(match e.kind() {
-                std::io::ErrorKind::ReadOnlyFilesystem => {
-                    ChmodError::ChangingPermissions(file_path.into(), e)
-                }
-                _ => ChmodError::PermissionDenied(file_path.into()),
-            }
-            .into());
+            return Err(ChmodError::ChangingPermissions(file_path.into(), e).into());
         }
 
         // Report the change using the helper method
