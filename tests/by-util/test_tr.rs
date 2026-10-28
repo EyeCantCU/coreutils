@@ -69,7 +69,6 @@ fn test_invalid_input() {
 #[case::interpret_one_and_two_digit_octal_escape(&["XYZ", r"\0\11\77"], "XYZ", "\0\t?")]
 #[case::octal_escape_is_at_most_three_digits(&["XY", r"\0156"], "XY", "\r6")]
 #[case::non_octal_digit_ends_escape(&["rust", r"\08\11956"], "rust", "\08\t9")]
-#[case::interpret_backslash_at_eol_literally(&["X", r"\"], "X", "\\")]
 #[case::tr_translate_range_to_repeat_class_zero(&["abcd", "[]*]"], "abcd", "]]]]")]
 #[case::tr_translate_range_to_repeat_class(&["rst", "[%*]uvw"], "rst", "uvw")]
 #[case::tr_translate_empty_set1_noop(&["", "[.*]"], "rst", "rst")]
@@ -1121,6 +1120,27 @@ fn test_trailing_backslash() {
         .succeeds()
         .stderr_is("tr: warning: an unescaped backslash at end of string is not portable\n")
         .stdout_is("abc");
+}
+
+#[test]
+#[cfg(unix)]
+fn test_trailing_backslash_in_second_set() {
+    new_ucmd!()
+        .args(&[".", r"\"])
+        .pipe_in("a.b")
+        .succeeds()
+        .stderr_is("tr: warning: an unescaped backslash at end of string is not portable\n")
+        .stdout_is(r"a\b");
+    // Each string ending with an unescaped backslash gets a warning.
+    new_ucmd!()
+        .args(&[r"\", r"\"])
+        .pipe_in(r"a\b")
+        .succeeds()
+        .stderr_is(
+            "tr: warning: an unescaped backslash at end of string is not portable\n\
+             tr: warning: an unescaped backslash at end of string is not portable\n",
+        )
+        .stdout_is(r"a\b");
 }
 
 #[test]
