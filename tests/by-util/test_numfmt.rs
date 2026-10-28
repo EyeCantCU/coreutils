@@ -2127,3 +2127,14 @@ fn test_stdbuf_line_buffered_stdout() {
         .with_current_output()
         .stdout_only("1.0k\n");
 }
+
+/// A `--debug` message that cannot be written to stderr makes `numfmt` fail.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_debug_unwritable_stderr() {
+    new_ucmd!()
+        .args(&["--debug", "1"])
+        .set_stderr(std::fs::File::create("/dev/full").unwrap())
+        .fails_with_code(1)
+        .stdout_is("1\n");
+}
