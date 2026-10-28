@@ -84,6 +84,15 @@ impl Uniq {
         let mut next_meta = LineMeta::default();
         let mut line_out = Vec::with_capacity(1024);
 
+        // When only the first line of each group is printed, it can be written
+        // as soon as the group starts instead of when the next group is seen,
+        // so output keeps up with input that arrives slowly.
+        let write_at_group_start = self.prints_first_line_of_every_group();
+        if write_at_group_start {
+            self.write_line(writer, &mut line_out, &current_buf, 1, false)?;
+            first_line_printed = true;
+        }
+
         while Self::read_line(&mut reader, &mut next_buf, line_terminator)? {
             self.build_meta(&next_buf, &mut next_meta);
 
@@ -101,6 +110,10 @@ impl Uniq {
                     std::mem::swap(&mut current_meta, &mut next_meta);
                 }
                 group_count += 1;
+            } else if write_at_group_start {
+                std::mem::swap(&mut current_buf, &mut next_buf);
+                std::mem::swap(&mut current_meta, &mut next_meta);
+                self.write_line(writer, &mut line_out, &current_buf, 1, true)?;
             } else {
                 if (group_count == 1 && !self.repeats_only)
                     || (group_count > 1 && !self.uniques_only)
@@ -121,7 +134,9 @@ impl Uniq {
             next_buf.clear();
         }
 
-        if (group_count == 1 && !self.repeats_only) || (group_count > 1 && !self.uniques_only) {
+        let group_matches_filter =
+            (group_count == 1 && !self.repeats_only) || (group_count > 1 && !self.uniques_only);
+        if !write_at_group_start && group_matches_filter {
             self.write_line(
                 writer,
                 &mut line_out,
@@ -142,6 +157,16 @@ impl Uniq {
             .flush()
             .map_err_context(|| translate!("uniq-error-write-error"))?;
         Ok(())
+    }
+
+    /// Whether the output is exactly the first line of every group, with no
+    /// counts, filtering, or group separators.
+    fn prints_first_line_of_every_group(&self) -> bool {
+        !self.show_counts
+            && !self.repeats_only
+            && !self.uniques_only
+            && !self.all_repeated
+            && self.delimiters == Delimiters::None
     }
 
     fn get_line_terminator(&self) -> u8 {
