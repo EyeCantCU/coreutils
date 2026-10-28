@@ -1317,6 +1317,82 @@ fn test_read_error() {
         .stderr_is("cut: Input/output error\n");
 }
 
+/// Lines longer than the input buffer are cut piece by piece; the result must
+/// be the same as for a short line.
+#[test]
+fn test_line_longer_than_buffer() {
+    let mut input = "a".repeat(100_000);
+    input.push('\t');
+    input.push_str(&"b".repeat(100_000));
+    input.push_str("\tccccc\nx\ty\n");
+
+    new_ucmd!()
+        .arg("-f2")
+        .pipe_in(input.as_str())
+        .succeeds()
+        .stdout_only(format!("{}\ny\n", "b".repeat(100_000)));
+    new_ucmd!()
+        .args(&["-s", "-f3,1", "--output-delimiter=:"])
+        .pipe_in(input.as_str())
+        .succeeds()
+        .stdout_only(format!("{}:ccccc\nx\n", "a".repeat(100_000)));
+    new_ucmd!()
+        .args(&["-b99999-100002,200000-200003", "--output-delimiter=:"])
+        .pipe_in(input.as_str())
+        .succeeds()
+        .stdout_only("aa\tb:bb\tc\n\n");
+    new_ucmd!()
+        .args(&["-f1", "-d", "c"])
+        .pipe_in(input.as_str())
+        .succeeds()
+        .stdout_only(input.replace("ccccc", ""));
+}
+
+/// A line without end must not be held in memory when the selection does not
+/// need it.
+#[cfg(target_os = "linux")]
+#[test]
+#[cfg_attr(
+    wasi_runner,
+    ignore = "WASI: wasmtime itself needs more memory than the guest's rlimit allows"
+)]
+fn test_long_line_bounded_memory() {
+    use rlimit::Resource;
+    use std::process::Stdio;
+    use uutests::util::TestScenario;
+    use uutests::util_name;
+
+    const AS_LIMIT: u64 = 100 * 1024 * 1024;
+
+    let ts = TestScenario::new(util_name!());
+    let at = &ts.fixtures;
+    // A sparse file of zero bytes, far larger than the memory limit.
+    std::fs::File::create(at.plus("zeros"))
+        .unwrap()
+        .set_len(2 * AS_LIMIT)
+        .unwrap();
+
+    for (args, expected) in [
+        (&["-b1"][..], "\0\n"),
+        (&["-c1"][..], "\0\n"),
+        (&["-s", "-f2"][..], ""),
+    ] {
+        ts.ucmd()
+            .env("LC_ALL", "C")
+            .limit(Resource::AS, AS_LIMIT, AS_LIMIT)
+            .args(args)
+            .arg(at.plus("zeros"))
+            .succeeds()
+            .stdout_only(expected);
+    }
+    ts.ucmd()
+        .limit(Resource::AS, AS_LIMIT, AS_LIMIT)
+        .set_stdout(Stdio::null())
+        .arg("-f1")
+        .arg(at.plus("zeros"))
+        .succeeds();
+}
+
 #[cfg(unix)]
 #[cfg(all(feature = "feat_diagnostics", not(wasi_runner)))]
 mod diagnostics {
