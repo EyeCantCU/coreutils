@@ -179,9 +179,9 @@ fn tail_file(
                     && (!st.is_file() || st.len() > blksize_limit)
                 {
                     bounded_tail(&mut file, settings)?;
-                    reader = BufReader::new(file);
+                    reader = BufReader::new(NonBlockingReader(file));
                 } else {
-                    reader = BufReader::new(file);
+                    reader = BufReader::new(NonBlockingReader(file));
                     unbounded_tail(&mut reader, settings)?;
                 }
                 if input.is_tailable() {
@@ -215,34 +215,35 @@ fn tail_file(
 
 /// Opens a file, using non-blocking mode for FIFOs when `use_nonblock_for_fifo` is true.
 ///
-/// When opening a FIFO with `--pid`, we need to use `O_NONBLOCK` so that:
-/// 1. The `open()` call doesn't block waiting for a writer
-/// 2. We can periodically check if the monitored process is still alive
-///
-/// After opening, we clear `O_NONBLOCK` so subsequent reads block normally.
+/// With `--pid` the FIFO stays non-blocking, so neither `open()` nor a read from a silent
+/// writer can stop tail from noticing that the process has exited.
 /// Without `--pid`, FIFOs block on `open()` until a writer connects (GNU behavior).
 #[cfg(unix)]
 fn open_file(path: &Path, use_nonblock_for_fifo: bool) -> io::Result<File> {
-    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     use std::fs::OpenOptions;
     use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 
     let is_fifo = path.metadata().is_ok_and(|m| m.file_type().is_fifo());
 
     if is_fifo && use_nonblock_for_fifo {
-        let file = OpenOptions::new()
+        OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NONBLOCK)
-            .open(path)?;
-
-        // Clear O_NONBLOCK so reads block normally
-        let flags = fcntl_getfl(&file)?;
-        let new_flags = flags & !OFlags::NONBLOCK;
-        fcntl_setfl(&file, new_flags)?;
-
-        Ok(file)
+            .open(path)
     } else {
         File::open(path)
+    }
+}
+
+/// Treats `WouldBlock` on a non-blocking descriptor as the current end of input.
+struct NonBlockingReader<R>(R);
+
+impl<R: Read> Read for NonBlockingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.0.read(buf) {
+            Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(0),
+            result => result,
+        }
     }
 }
 
