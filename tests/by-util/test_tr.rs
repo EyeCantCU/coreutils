@@ -462,15 +462,6 @@ fn test_non_octal_digit_ends_escape() {
 }
 
 #[test]
-fn test_interpret_backslash_at_eol_literally() {
-    new_ucmd!()
-        .args(&["X", r"\"])
-        .pipe_in("X")
-        .succeeds()
-        .stdout_is("\\");
-}
-
-#[test]
 fn test_more_than_2_sets() {
     new_ucmd!().args(&["'abcdef'", "'a'", "'b'"]).fails();
 }
@@ -1490,6 +1481,27 @@ fn test_trailing_backslash() {
         .succeeds()
         .stderr_is("tr: warning: an unescaped backslash at end of string is not portable\n")
         .stdout_is("abc");
+}
+
+#[test]
+#[cfg(unix)]
+fn test_trailing_backslash_in_second_set() {
+    new_ucmd!()
+        .args(&[".", r"\"])
+        .pipe_in("a.b")
+        .succeeds()
+        .stderr_is("tr: warning: an unescaped backslash at end of string is not portable\n")
+        .stdout_is(r"a\b");
+    // Each string ending with an unescaped backslash gets a warning.
+    new_ucmd!()
+        .args(&[r"\", r"\"])
+        .pipe_in(r"a\b")
+        .succeeds()
+        .stderr_is(
+            "tr: warning: an unescaped backslash at end of string is not portable\n\
+             tr: warning: an unescaped backslash at end of string is not portable\n",
+        )
+        .stdout_is(r"a\b");
 }
 
 #[test]

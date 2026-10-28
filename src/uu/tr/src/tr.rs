@@ -83,8 +83,8 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         }
     }
 
-    if let Some(first) = sets.first() {
-        let slice = os_str_as_bytes(first)?;
+    for set in &sets {
+        let slice = os_str_as_bytes(set)?;
         let trailing_backslashes = slice.iter().rev().take_while(|&&c| c == b'\\').count();
         if trailing_backslashes % 2 == 1 {
             // The trailing backslash has a non-backslash character before it.
