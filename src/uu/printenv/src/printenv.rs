@@ -4,16 +4,22 @@
 // file that was distributed with this source code.
 
 use std::env;
-use std::io::Write;
+use std::ffi::OsStr;
+use std::io::{self, IsTerminal, Write, stdout};
 
+use clap::builder::PossibleValue;
 use clap::{Arg, ArgAction, Command};
 
-use uucore::display::{OsWrite, print_all_env_vars};
+use uucore::display::OsWrite;
 use uucore::error::UResult;
+use uucore::i18n::get_ctype_encoding;
 use uucore::line_ending::LineEnding;
-use uucore::{format_usage, translate};
+use uucore::parser::shortcut_value_parser::ShortcutValueParser;
+use uucore::quoting_style::{QuotingStyle, escape_bytes, quoting_style_from_env};
+use uucore::{format_usage, os_str_as_bytes_lossy, translate};
 
 static OPT_NULL: &str = "null";
+static OPT_QUOTING_STYLE: &str = "quoting-style";
 
 static ARG_VARIABLES: &str = "variables";
 
@@ -27,9 +33,16 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         .unwrap_or_default();
 
     let separator = LineEnding::from_zero_flag(matches.get_flag(OPT_NULL));
+    let style = quoting_style(&matches);
 
     if variables.is_empty() {
-        print_all_env_vars(separator)?;
+        let mut stdout = stdout().lock();
+        for (name, value) in env::vars_os() {
+            write_quoted(&mut stdout, &name, style)?;
+            stdout.write_all(b"=")?;
+            write_quoted(&mut stdout, &value, style)?;
+            write!(stdout, "{separator}")?;
+        }
         return Ok(());
     }
 
@@ -41,8 +54,8 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             continue;
         }
         if let Some(var) = env::var_os(env_var) {
-            let mut stdout = std::io::stdout().lock();
-            stdout.write_all_os(&var)?;
+            let mut stdout = stdout().lock();
+            write_quoted(&mut stdout, &var, style)?;
             write!(stdout, "{separator}")?;
         } else {
             error_found = true;
@@ -50,6 +63,41 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     }
 
     if error_found { Err(1.into()) } else { Ok(()) }
+}
+
+/// Output is quoted when `--quoting-style` is given, or when standard output
+/// is a terminal, in which case `QUOTING_STYLE` (default `shell-escape`)
+/// picks the style. Otherwise it is written as-is.
+fn quoting_style(matches: &clap::ArgMatches) -> Option<QuotingStyle> {
+    let style = if let Some(style) = matches.get_one::<String>(OPT_QUOTING_STYLE) {
+        QuotingStyle::parse(style)?
+    } else if stdout().is_terminal() {
+        quoting_style_from_env().unwrap_or(QuotingStyle::SHELL_ESCAPE)
+    } else {
+        return None;
+    };
+    // Control characters are shown rather than replaced by '?'.
+    Some(style.show_control(true))
+}
+
+fn write_quoted(out: &mut impl OsWrite, s: &OsStr, style: Option<QuotingStyle>) -> io::Result<()> {
+    let Some(style) = style else {
+        return out.write_all_os(s);
+    };
+    let encoding = get_ctype_encoding();
+    let bytes = os_str_as_bytes_lossy(s);
+    if style == QuotingStyle::Escape {
+        // Unlike ls, printenv does not backslash-escape spaces in this style.
+        for (i, piece) in bytes.split(|&b| b == b' ').enumerate() {
+            if i > 0 {
+                out.write_all(b" ")?;
+            }
+            out.write_all(&escape_bytes(piece, style, encoding))?;
+        }
+        Ok(())
+    } else {
+        out.write_all(&escape_bytes(&bytes, style, encoding))
+    }
 }
 
 pub fn uu_app() -> Command {
@@ -65,6 +113,24 @@ pub fn uu_app() -> Command {
                 .long(OPT_NULL)
                 .help(translate!("printenv-help-null"))
                 .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new(OPT_QUOTING_STYLE)
+                .long(OPT_QUOTING_STYLE)
+                .value_name("WORD")
+                .help(translate!("printenv-help-quoting-style"))
+                .value_parser(ShortcutValueParser::new([
+                    PossibleValue::new("literal"),
+                    PossibleValue::new("locale"),
+                    PossibleValue::new("shell"),
+                    PossibleValue::new("shell-escape"),
+                    PossibleValue::new("shell-always"),
+                    PossibleValue::new("shell-escape-always"),
+                    PossibleValue::new("clocale"),
+                    PossibleValue::new("c"),
+                    PossibleValue::new("c-maybe"),
+                    PossibleValue::new("escape"),
+                ])),
         )
         .arg(
             Arg::new(ARG_VARIABLES)
