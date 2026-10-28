@@ -390,8 +390,7 @@ fn stty(opts: &Options) -> UResult<()> {
             }
         }
 
-        let mut termios =
-            tcgetattr(opts.file.as_fd()).map_err_context(|| opts.device_name.clone())?;
+        let mut termios = device_termios(opts)?;
 
         // iterate over valid_args, match on the arg type, do the matching apply function
         for arg in &valid_args {
@@ -411,10 +410,20 @@ fn stty(opts: &Options) -> UResult<()> {
         }
         tcsetattr(opts.file.as_fd(), set_arg, &termios)?;
     } else {
-        let termios = tcgetattr(opts.file.as_fd()).map_err_context(|| opts.device_name.clone())?;
+        let termios = device_termios(opts)?;
         print_settings(&termios, opts)?;
     }
     Ok(())
+}
+
+/// Reads the attributes of the device, reporting a stdin that was closed at
+/// startup instead of probing the `/dev/null` it was replaced with.
+fn device_termios(opts: &Options) -> UResult<Termios> {
+    #[cfg(all(unix, not(target_os = "fuchsia")))]
+    if matches!(opts.file, Device::Stdin(_)) {
+        uucore::signals::ensure_stdin_open().map_err_context(|| opts.device_name.clone())?;
+    }
+    tcgetattr(opts.file.as_fd()).map_err_context(|| opts.device_name.clone())
 }
 
 // The GNU implementation adds the --help message when the args are incorrectly formatted
