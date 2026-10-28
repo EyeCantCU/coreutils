@@ -3852,3 +3852,14 @@ sort: invalid suffix in --buffer-size argument '8zz'
 }
 
 /* spell-checker: enable */
+
+/// A `--debug` message that cannot be written to stderr makes `sort` fail.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_debug_unwritable_stderr() {
+    new_ucmd!()
+        .args(&["--debug", "/dev/null"])
+        .set_stderr(std::fs::File::create("/dev/full").unwrap())
+        .fails_with_code(2)
+        .no_stdout();
+}
