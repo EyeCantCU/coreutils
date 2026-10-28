@@ -6,9 +6,9 @@
 // spell-checker:ignore (ToDO) INFTY MULT PSKIP accum aftertab beforetab breakwords fmt's formatline linebreak linebreaking linebreaks linelen maxlength minlength nchars noformat noformatline ostream overlen parasplit plass pmatch poffset posn powf prefixindent punct signum slen sstart tabwidth tlen underlen winfo wlen wordlen wordsplits xanti xprefix
 
 use std::cell::Cell;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, ErrorKind};
 use std::iter::Peekable;
-use std::slice::Iter;
+use std::mem;
 
 use crate::FileOrStdReader;
 use crate::FmtOptions;
@@ -120,12 +120,32 @@ fn is_fmt_whitespace_byte(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C)
 }
 
+/// Longest piece of an input line that is held at once. Longer lines are
+/// handed on in pieces, cut before a run of whitespace when possible and
+/// inside a word otherwise. This is far above the maximum width, so a word is
+/// only ever cut when it would sit on a line of its own anyway.
+const LINE_CAP: usize = 32 * 1024;
+
+/// Amount of paragraph text gathered before the lines read so far are
+/// formatted. The rest of the paragraph follows in further chunks.
+const PARA_CAP: usize = 16 * 1024;
+
 // lines with PSKIP, lacking PREFIX, or which are entirely blank are
 // NoFormatLines; otherwise, they are FormatLines
 #[derive(Debug)]
 pub enum Line {
     FormatLine(FileLine),
-    NoFormatLine(Vec<u8>, bool),
+    NoFormatLine(NoFormatLine),
+}
+
+/// A line that is copied as it is
+#[derive(Debug)]
+pub struct NoFormatLine {
+    pub line: Vec<u8>,
+    /// Whether the line is entirely blank
+    blank: bool,
+    /// Whether the line ends with a newline in the output
+    pub newline: bool,
 }
 
 impl Line {
@@ -138,9 +158,9 @@ impl Line {
     }
 
     /// when we know that it's a [`Line::NoFormatLine`], as in the [`ParagraphStream`] iterator
-    fn get_noformatline(self) -> (Vec<u8>, bool) {
+    fn get_noformatline(self) -> NoFormatLine {
         match self {
-            Self::NoFormatLine(s, b) => (s, b),
+            Self::NoFormatLine(nfl) => nfl,
             Self::FormatLine(..) => panic!("Found FormatLine when expecting NoFormatLine"),
         }
     }
@@ -159,6 +179,19 @@ pub struct FileLine {
     indent_len: usize,
     /// PREFIX indent length taking into account tabs
     prefix_len: usize,
+    /// This is the rest of an input line whose start was handed on already
+    cont: bool,
+    /// The input line goes on after this piece
+    cut: bool,
+    /// The input line goes on in the middle of the last word of this piece
+    in_word: bool,
+}
+
+/// How to treat the next piece of an input line that was cut
+#[derive(Clone, Copy)]
+enum Cont {
+    Format,
+    NoFormat,
 }
 
 /// Iterator that produces a stream of Lines from a file
@@ -167,6 +200,10 @@ pub struct FileLines<'a> {
     reader: &'a mut FileOrStdReader,
     /// Receives the read error that ended the input, if any.
     error: &'a Cell<Option<io::Error>>,
+    /// Bytes read beyond the point where the current line was cut
+    pending: Vec<u8>,
+    /// Set while the current input line was cut and goes on
+    cont: Option<Cont>,
 }
 
 impl FileLines<'_> {
@@ -179,6 +216,88 @@ impl FileLines<'_> {
             opts,
             reader,
             error,
+            pending: Vec::new(),
+            cont: None,
+        }
+    }
+
+    /// Read the next line, or at most about [`LINE_CAP`] bytes of it.
+    ///
+    /// Returns the bytes, whether a newline ended them, and, if the line was
+    /// cut, whether it was cut inside a word.
+    fn read_piece(&mut self, cont: bool) -> Option<(Vec<u8>, bool, Option<bool>)> {
+        let mut buf = mem::take(&mut self.pending);
+        loop {
+            let avail = match self.reader.fill_buf() {
+                Ok(avail) => avail,
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    self.error.set(Some(e));
+                    return None;
+                }
+            };
+            if avail.is_empty() {
+                return (!buf.is_empty()).then_some((buf, false, None));
+            }
+            // Only look at as much as fits below the cap, unless the line
+            // cannot be cut yet, in which case it has to grow.
+            let limit = if buf.len() < LINE_CAP {
+                avail.len().min(LINE_CAP - buf.len())
+            } else {
+                avail.len()
+            };
+            if let Some(i) = memchr::memchr(b'\n', &avail[..limit]) {
+                buf.extend_from_slice(&avail[..i]);
+                self.reader.consume(i + 1);
+                return Some((buf, true, None));
+            }
+            buf.extend_from_slice(&avail[..limit]);
+            self.reader.consume(limit);
+            if buf.len() >= LINE_CAP
+                && let Some((at, in_word)) = self.cut_point(&buf, cont)
+            {
+                self.pending = buf.split_off(at);
+                return Some((buf, false, Some(in_word)));
+            }
+        }
+    }
+
+    /// Where to cut an overlong line, and whether that is inside a word.
+    ///
+    /// The first piece of a line must show everything needed to classify the
+    /// line: its prefix and the first word after it. After that, cut at the
+    /// start of the last run of whitespace so that words stay whole, or at
+    /// the end if the piece is one single word.
+    fn cut_point(&self, buf: &[u8], cont: bool) -> Option<(usize, bool)> {
+        let first = buf.iter().position(|&b| !is_fmt_whitespace_byte(b))?;
+        let content = if cont {
+            first
+        } else {
+            let prefix_len = self
+                .opts
+                .prefix
+                .as_ref()
+                .map_or(0, String::len)
+                .max(self.opts.anti_prefix.as_ref().map_or(0, String::len));
+            let after = first + prefix_len;
+            after
+                + buf
+                    .get(after..)?
+                    .iter()
+                    .position(|&b| !is_fmt_whitespace_byte(b))?
+        };
+        match buf[content..]
+            .iter()
+            .rposition(|&b| is_fmt_whitespace_byte(b))
+        {
+            Some(pos) => {
+                let mut start = content + pos;
+                while is_fmt_whitespace_byte(buf[start - 1]) {
+                    start -= 1;
+                }
+                Some((start, false))
+            }
+            None => Some((buf.len(), true)),
         }
     }
 
@@ -262,34 +381,63 @@ impl Iterator for FileLines<'_> {
     type Item = Line;
 
     fn next(&mut self) -> Option<Line> {
-        let mut buf = Vec::new();
-        self.reader
-            .read_until(b'\n', &mut buf)
-            .map_err(|e| self.error.set(Some(e)))
-            .ok()
-            .filter(|n| *n > 0)?;
-        if buf.ends_with(b"\n") {
+        let cont = self.cont.take();
+        let (mut buf, has_newline, cut) = self.read_piece(cont.is_some())?;
+        if has_newline && buf.ends_with(b"\r") {
             buf.pop();
-            if buf.ends_with(b"\r") {
-                buf.pop();
-            }
         }
         let n = buf;
+
+        // the rest of a cut line is treated like its start
+        if let Some(kind) = cont {
+            if cut.is_some() {
+                self.cont = Some(kind);
+            }
+            return Some(match kind {
+                Cont::NoFormat => Line::NoFormatLine(NoFormatLine {
+                    line: n,
+                    blank: false,
+                    newline: has_newline,
+                }),
+                Cont::Format => Line::FormatLine(FileLine {
+                    line: n,
+                    indent_end: 0,
+                    prefix_indent_end: 0,
+                    indent_len: 0,
+                    prefix_len: 0,
+                    cont: true,
+                    cut: cut.is_some(),
+                    in_word: cut == Some(true),
+                }),
+            });
+        }
+        if cut.is_some() {
+            self.cont = Some(Cont::NoFormat);
+        }
 
         // if this line is entirely whitespace,
         // emit a blank line
         // Err(true) indicates that this was a linebreak,
         // which is important to know when detecting mail headers
         if n.iter().all(|&b| is_fmt_whitespace_byte(b)) {
-            return Some(Line::NoFormatLine(Vec::new(), true));
+            return Some(Line::NoFormatLine(NoFormatLine {
+                line: Vec::new(),
+                blank: true,
+                newline: true,
+            }));
         }
 
         let (pmatch, poffset) = self.match_prefix(&n[..]);
 
         // if this line does not match the prefix,
-        // emit the line unprocessed and iterate again
+        // emit the line unprocessed (even when it lacks a final newline)
+        // and iterate again
         if !pmatch {
-            return Some(Line::NoFormatLine(n, false));
+            return Some(Line::NoFormatLine(NoFormatLine {
+                line: n,
+                blank: false,
+                newline: has_newline,
+            }));
         }
 
         // if the line matches the prefix, but is blank after,
@@ -301,25 +449,39 @@ impl Iterator for FileLines<'_> {
             .iter()
             .all(|&b| is_fmt_whitespace_byte(b))
         {
-            return Some(Line::NoFormatLine(n, false));
+            return Some(Line::NoFormatLine(NoFormatLine {
+                line: n,
+                blank: false,
+                newline: true,
+            }));
         }
 
         // skip if this line matches the anti_prefix
         // (NOTE definition of match_anti_prefix is TRUE if we should process)
         if !self.match_anti_prefix(&n[..]) {
-            return Some(Line::NoFormatLine(n, false));
+            return Some(Line::NoFormatLine(NoFormatLine {
+                line: n,
+                blank: false,
+                newline: has_newline,
+            }));
         }
 
         // figure out the indent, prefix, and prefixindent ending points
         let prefix_end = poffset + self.opts.prefix.as_ref().map_or(0, String::len);
         let (indent_end, prefix_len, indent_len) = self.compute_indent(&n[..], prefix_end);
 
+        if cut.is_some() {
+            self.cont = Some(Cont::Format);
+        }
         Some(Line::FormatLine(FileLine {
             line: n,
             indent_end,
             prefix_indent_end: poffset,
             indent_len,
             prefix_len,
+            cont: false,
+            cut: cut.is_some(),
+            in_word: cut == Some(true),
         }))
     }
 }
@@ -329,10 +491,15 @@ impl Iterator for FileLines<'_> {
 ///
 /// We retain the raw bytes from the [`FileLine`]; the other info
 /// is only there to help us in deciding how to merge lines into Paragraphs
+///
+/// A long paragraph is handed on in several chunks, each a `Paragraph` with
+/// the same indentation info, so that only a bounded amount of it is held.
 #[derive(Debug)]
 pub struct Paragraph {
     /// the lines of the file
     lines: Vec<Vec<u8>>,
+    /// for each line, whether it is the rest of the input line before it
+    cont: Vec<bool>,
     /// string representing the init, that is, the first line's indent
     pub init_str: Vec<u8>,
     /// printable length of the init string considering TABWIDTH
@@ -347,6 +514,34 @@ pub struct Paragraph {
     indent_end: usize,
     /// we need to know if this is a mail header because we do word splitting differently in that case
     pub mail_header: bool,
+    /// whether this is the first chunk of the paragraph
+    first: bool,
+    /// whether more chunks of this paragraph follow
+    pub more: bool,
+    /// whether the first line goes on with a word cut at the end of the previous chunk
+    pub starts_in_word: bool,
+    /// whether the last line was cut in the middle of a word
+    pub ends_in_word: bool,
+}
+
+/// What is known about the paragraph being read, kept between its chunks
+#[derive(Default)]
+struct ParaContext {
+    init_str: Vec<u8>,
+    init_end: usize,
+    init_len: usize,
+    indent_str: Vec<u8>,
+    indent_end: usize,
+    indent_len: usize,
+    prefix_len: usize,
+    prefix_indent_end: usize,
+    in_mail: bool,
+    /// for when we use crown or tagged mode
+    second_done: bool,
+    /// whether a line was seen yet
+    started: bool,
+    /// whether the previous chunk ended in the middle of a word
+    in_word: bool,
 }
 
 /// An iterator producing a stream of paragraphs from a stream of lines
@@ -355,6 +550,8 @@ pub struct ParagraphStream<'a> {
     lines: Peekable<FileLines<'a>>,
     next_mail: bool,
     opts: &'a FmtOptions,
+    /// the paragraph of which a chunk was handed on and more may follow
+    open: Option<ParaContext>,
 }
 
 impl ParagraphStream<'_> {
@@ -370,6 +567,7 @@ impl ParagraphStream<'_> {
             lines,
             next_mail: true,
             opts,
+            open: None,
         }
     }
 
@@ -403,68 +601,69 @@ impl ParagraphStream<'_> {
 }
 
 impl Iterator for ParagraphStream<'_> {
-    type Item = Result<Paragraph, Vec<u8>>;
+    type Item = Result<Paragraph, NoFormatLine>;
 
     #[allow(clippy::cognitive_complexity)]
-    fn next(&mut self) -> Option<Result<Paragraph, Vec<u8>>> {
-        // return a NoFormatLine in an Err; it should immediately be output
-        let noformat = match self.lines.peek()? {
-            Line::FormatLine(_) => false,
-            Line::NoFormatLine(_, _) => true,
+    fn next(&mut self) -> Option<Result<Paragraph, NoFormatLine>> {
+        let (mut ctx, first) = if let Some(ctx) = self.open.take() {
+            // go on with the open paragraph; if it ended at the end of the
+            // previous chunk, this yields an empty final chunk
+            (ctx, false)
+        } else {
+            // return a NoFormatLine in an Err; it should immediately be output
+            let noformat = match self.lines.peek()? {
+                Line::FormatLine(_) => false,
+                Line::NoFormatLine(_) => true,
+            };
+
+            // found a NoFormatLine, immediately dump it out
+            if noformat {
+                let nfl = self.lines.next().unwrap().get_noformatline();
+                self.next_mail = nfl.blank;
+                return Some(Err(nfl));
+            }
+            (ParaContext::default(), true)
         };
 
-        // found a NoFormatLine, immediately dump it out
-        if noformat {
-            let (s, nm) = self.lines.next().unwrap().get_noformatline();
-            self.next_mail = nm;
-            return Some(Err(s));
-        }
-
         // found a FormatLine, now build a paragraph
-        let mut init_str = Vec::new();
-        let mut init_end = 0;
-        let mut init_len = 0;
-        let mut indent_str = Vec::new();
-        let mut indent_end = 0;
-        let mut indent_len = 0;
-        let mut prefix_len = 0;
-        let mut prefix_indent_end = 0;
         let mut p_lines = Vec::new();
+        let mut p_cont = Vec::new();
+        let mut held = 0;
+        let mut more = false;
+        let starts_in_word = mem::take(&mut ctx.in_word);
 
-        let mut in_mail = false;
-        let mut second_done = false; // for when we use crown or tagged mode
         while let Some(Line::FormatLine(fl)) = self.lines.peek() {
-            // peek ahead
-            // need to explicitly force fl out of scope before we can call self.lines.next()
-            if p_lines.is_empty() {
+            if fl.cont {
+                // the rest of a line already taken belongs to the same paragraph
+            } else if !ctx.started {
                 // first time through the loop, get things set up
                 // detect mail header
                 if self.opts.mail && self.next_mail && ParagraphStream::is_mail_header(fl) {
-                    in_mail = true;
+                    ctx.in_mail = true;
                     // there can't be any indent or prefixindent because otherwise is_mail_header
                     // would fail since there cannot be any whitespace before the colon in a
                     // valid header field
-                    indent_str.extend_from_slice(b"  ");
-                    indent_len = 2;
+                    ctx.indent_str.extend_from_slice(b"  ");
+                    ctx.indent_len = 2;
                 } else {
                     if self.opts.crown || self.opts.tagged {
-                        init_str.extend_from_slice(&fl.line[..fl.indent_end]);
-                        init_len = fl.indent_len;
-                        init_end = fl.indent_end;
+                        ctx.init_str.extend_from_slice(&fl.line[..fl.indent_end]);
+                        ctx.init_len = fl.indent_len;
+                        ctx.init_end = fl.indent_end;
                     } else {
-                        second_done = true;
+                        ctx.second_done = true;
                     }
 
                     // these will be overwritten in the 2nd line of crown or tagged mode, but
                     // we are not guaranteed to get to the 2nd line, e.g., if the next line
                     // is a NoFormatLine or None. Thus, we set sane defaults the 1st time around
-                    indent_str.extend_from_slice(&fl.line[..fl.indent_end]);
-                    indent_len = fl.indent_len;
-                    indent_end = fl.indent_end;
+                    ctx.indent_str.extend_from_slice(&fl.line[..fl.indent_end]);
+                    ctx.indent_len = fl.indent_len;
+                    ctx.indent_end = fl.indent_end;
 
                     // save these to check for matching lines
-                    prefix_len = fl.prefix_len;
-                    prefix_indent_end = fl.prefix_indent_end;
+                    ctx.prefix_len = fl.prefix_len;
+                    ctx.prefix_indent_end = fl.prefix_indent_end;
 
                     // in tagged mode, add 4 spaces of additional indenting by default
                     // (gnu fmt's behavior is different: it seems to find the closest column to
@@ -472,72 +671,101 @@ impl Iterator for ParagraphStream<'_> {
                     // pretty arbitrary.
                     // Perhaps a better default would be 1 TABWIDTH? But ugh that's so big.
                     if self.opts.tagged {
-                        indent_str.extend_from_slice(b"    ");
-                        indent_len += 4;
+                        ctx.indent_str.extend_from_slice(b"    ");
+                        ctx.indent_len += 4;
                     }
                 }
-            } else if in_mail {
+                ctx.started = true;
+            } else if ctx.in_mail {
                 // lines following mail headers must begin with spaces
                 if fl.indent_end == 0 || (self.opts.prefix.is_some() && fl.prefix_indent_end == 0) {
                     break; // this line does not begin with spaces
                 }
-            } else if !second_done {
+            } else if !ctx.second_done {
                 // now we have enough info to handle crown margin and tagged mode
 
                 // in both crown and tagged modes we require that prefix_len is the same
-                if prefix_len != fl.prefix_len || prefix_indent_end != fl.prefix_indent_end {
+                if ctx.prefix_len != fl.prefix_len || ctx.prefix_indent_end != fl.prefix_indent_end
+                {
                     break;
                 }
 
                 // in tagged mode, indent has to be *different* on following lines
                 if self.opts.tagged
-                    && indent_len - 4 == fl.indent_len
-                    && indent_end == fl.indent_end
+                    && ctx.indent_len - 4 == fl.indent_len
+                    && ctx.indent_end == fl.indent_end
                 {
                     break;
                 }
 
                 // this is part of the same paragraph, get the indent info from this line
-                indent_str.clear();
-                indent_str.extend_from_slice(&fl.line[..fl.indent_end]);
-                indent_len = fl.indent_len;
-                indent_end = fl.indent_end;
+                ctx.indent_str.clear();
+                ctx.indent_str.extend_from_slice(&fl.line[..fl.indent_end]);
+                ctx.indent_len = fl.indent_len;
+                ctx.indent_end = fl.indent_end;
 
-                second_done = true;
+                ctx.second_done = true;
             } else {
                 // detect mismatch
-                if indent_end != fl.indent_end
-                    || prefix_indent_end != fl.prefix_indent_end
-                    || indent_len != fl.indent_len
-                    || prefix_len != fl.prefix_len
+                if ctx.indent_end != fl.indent_end
+                    || ctx.prefix_indent_end != fl.prefix_indent_end
+                    || ctx.indent_len != fl.indent_len
+                    || ctx.prefix_len != fl.prefix_len
                 {
                     break;
                 }
             }
 
-            p_lines.push(self.lines.next().unwrap().get_formatline().line);
+            let fl = self.lines.next().unwrap().get_formatline();
+            held += fl.line.len() + 1;
+            p_lines.push(fl.line);
+            p_cont.push(fl.cont);
+
+            // a word that does not fit in memory is passed on piece by piece
+            if fl.in_word {
+                ctx.in_word = true;
+                more = true;
+                break;
+            }
 
             // when we're in split-only mode, we never join lines, so stop here
-            if self.opts.split_only {
+            if self.opts.split_only && !fl.cut {
+                break;
+            }
+
+            // hand on what was gathered so far once it gets large
+            if held >= PARA_CAP {
+                more = true;
                 break;
             }
         }
 
-        // if this was a mail header, then the next line can be detected as one. Otherwise, it cannot.
-        // NOTE next_mail is true at ParagraphStream instantiation, and is set to true after a blank
-        // NoFormatLine.
-        self.next_mail = in_mail;
-
-        Some(Ok(Paragraph {
+        let para = Paragraph {
             lines: p_lines,
-            init_str,
-            init_len,
-            init_end,
-            indent_str,
-            indent_len,
-            indent_end,
-            mail_header: in_mail,
-        }))
+            cont: p_cont,
+            init_str: ctx.init_str.clone(),
+            init_len: ctx.init_len,
+            init_end: ctx.init_end,
+            indent_str: ctx.indent_str.clone(),
+            indent_len: ctx.indent_len,
+            indent_end: ctx.indent_end,
+            mail_header: ctx.in_mail,
+            first,
+            more,
+            starts_in_word,
+            ends_in_word: ctx.in_word,
+        };
+
+        if more {
+            self.open = Some(ctx);
+        } else {
+            // if this was a mail header, then the next line can be detected as one. Otherwise, it cannot.
+            // NOTE next_mail is true at ParagraphStream instantiation, and is set to true after a blank
+            // NoFormatLine.
+            self.next_mail = ctx.in_mail;
+        }
+
+        Some(Ok(para))
     }
 }
 
@@ -548,66 +776,96 @@ pub struct ParaWords<'a> {
 }
 
 impl<'a> ParaWords<'a> {
-    pub fn new(opts: &'a FmtOptions, para: &'a Paragraph) -> Self {
+    /// Split a paragraph chunk into words, after the words `carry` held over
+    /// from earlier chunks. `prev_punct` tells whether the last word before
+    /// this chunk ended a sentence.
+    pub fn new(
+        opts: &'a FmtOptions,
+        para: &'a Paragraph,
+        carry: &'a [CarriedWord],
+        prev_punct: bool,
+    ) -> Self {
         let mut pw = ParaWords {
             opts,
             para,
-            words: Vec::new(),
+            words: carry.iter().map(CarriedWord::word).collect(),
         };
-        pw.create_words();
+        pw.create_words(prev_punct);
         pw
     }
 
-    fn create_words(&mut self) {
-        if self.para.mail_header {
-            // no extra spacing for mail headers; always exactly 1 space
-            // safe to trim_start on every line of a mail header, since the
-            // first line is guaranteed not to have any spaces
-            self.words.extend(
-                self.para
-                    .lines
-                    .iter()
-                    .flat_map(|x| {
-                        x.split(|b| is_fmt_whitespace_byte(*b))
-                            .filter(|segment| !segment.is_empty())
-                    })
-                    .map(|x| WordInfo {
-                        word: x,
-                        word_start: 0,
-                        word_nchars: byte_width(x),
-                        before_tab: None,
-                        after_tab: 0,
-                        sentence_start: false,
-                        ends_punct: false,
-                        new_line: false,
-                    }),
-            );
-        } else {
-            // first line
-            self.words.extend(if self.opts.crown || self.opts.tagged {
+    fn create_words(&mut self, mut prev_punct: bool) {
+        for (i, line) in self.para.lines.iter().enumerate() {
+            if self.para.mail_header {
+                // no extra spacing for mail headers; always exactly 1 space
+                // safe to trim_start on every line of a mail header, since the
+                // first line is guaranteed not to have any spaces
+                self.words.extend(
+                    line.split(|b| is_fmt_whitespace_byte(*b))
+                        .filter(|segment| !segment.is_empty())
+                        .map(|x| WordInfo {
+                            word: x,
+                            word_start: 0,
+                            word_nchars: byte_width(x),
+                            before_tab: None,
+                            after_tab: 0,
+                            sentence_start: false,
+                            ends_punct: false,
+                            new_line: false,
+                        }),
+                );
+            } else if self.para.cont[i] {
+                // the rest of a cut line: no indent, and not a new line
+                if let Some(word) = self.words.last() {
+                    prev_punct = word.ends_punct;
+                }
+                self.words
+                    .extend(WordSplit::continuing(self.opts, line, prev_punct));
+            } else if i == 0 && self.para.first && (self.opts.crown || self.opts.tagged) {
                 // crown and tagged mode has the "init" in the first line, so slice from there
-                WordSplit::new(self.opts, &self.para.lines[0][self.para.init_end..])
+                self.words
+                    .extend(WordSplit::new(self.opts, &line[self.para.init_end..]));
             } else {
                 // otherwise we slice from the indent
-                WordSplit::new(self.opts, &self.para.lines[0][self.para.indent_end..])
-            });
-
-            if self.para.lines.len() > 1 {
-                let indent_end = self.para.indent_end;
-                let opts = self.opts;
-                self.words.extend(
-                    self.para
-                        .lines
-                        .iter()
-                        .skip(1)
-                        .flat_map(|x| WordSplit::new(opts, &x[indent_end..])),
-                );
+                self.words
+                    .extend(WordSplit::new(self.opts, &line[self.para.indent_end..]));
             }
         }
     }
 
-    pub fn words(&'a self) -> Iter<'a, WordInfo<'a>> {
-        self.words.iter()
+    pub fn words(&'a self) -> &'a [WordInfo<'a>] {
+        &self.words
+    }
+}
+
+/// A word held over to the next chunk of a paragraph
+pub struct CarriedWord {
+    bytes: Vec<u8>,
+    info: WordInfo<'static>,
+}
+
+impl CarriedWord {
+    pub fn new(word: &WordInfo) -> Self {
+        Self {
+            bytes: word.word.to_vec(),
+            info: WordInfo {
+                word: &[],
+                word_start: word.word_start,
+                word_nchars: word.word_nchars,
+                before_tab: word.before_tab,
+                after_tab: word.after_tab,
+                sentence_start: word.sentence_start,
+                ends_punct: word.ends_punct,
+                new_line: word.new_line,
+            },
+        }
+    }
+
+    fn word(&self) -> WordInfo<'_> {
+        WordInfo {
+            word: &self.bytes,
+            ..self.info
+        }
     }
 }
 
@@ -617,6 +875,8 @@ struct WordSplit<'a> {
     length: usize,
     position: usize,
     prev_punct: bool,
+    /// whether the bytes start an input line
+    starts_line: bool,
 }
 
 impl WordSplit<'_> {
@@ -654,6 +914,19 @@ impl WordSplit<'_> {
             length: trimmed.len(),
             position: 0,
             prev_punct: false,
+            starts_line: true,
+        }
+    }
+
+    /// Split the rest of an input line that was cut before `bytes`.
+    fn continuing<'b>(opts: &'b FmtOptions, bytes: &'b [u8], prev_punct: bool) -> WordSplit<'b> {
+        WordSplit {
+            opts,
+            bytes,
+            length: bytes.len(),
+            position: 0,
+            prev_punct,
+            starts_line: false,
         }
     }
 
@@ -683,6 +956,7 @@ impl WordSplit<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct WordInfo<'a> {
     pub word: &'a [u8],
     pub word_start: usize,
@@ -704,7 +978,7 @@ impl<'a> Iterator for WordSplit<'a> {
         }
 
         let old_position = self.position;
-        let new_line = old_position == 0;
+        let new_line = old_position == 0 && self.starts_line;
 
         // find the start of the next word, and record if we find a tab character
         let (before_tab, after_tab, word_start) =
