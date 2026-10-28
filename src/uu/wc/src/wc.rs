@@ -31,6 +31,7 @@ use uucore::{
     error::{FromIo, UError, UResult},
     format_usage,
     hardware::{HardwareFeature, HasHardwareFeatures as _, SimdPolicy},
+    i18n::{UEncoding, get_ctype_encoding},
     parser::shortcut_value_parser::ShortcutValueParser,
     quoting_style::{self, QuotingStyle},
     show,
@@ -465,12 +466,33 @@ pub fn uu_app() -> Command {
 }
 
 fn word_count_from_reader<T: WordCountable>(
+    reader: T,
+    settings: &Settings,
+) -> (WordCount, Option<io::Error>) {
+    // Outside a UTF-8 locale every byte is one character, so -m reports
+    // the byte count instead of decoding the input.
+    let chars_are_bytes = settings.show_chars && get_ctype_encoding() != UEncoding::Utf8;
+    let (mut count, error) = word_count_from_reader_with(
+        reader,
+        settings.show_bytes || chars_are_bytes,
+        settings.show_chars && !chars_are_bytes,
+        settings,
+    );
+    if chars_are_bytes {
+        count.chars = count.bytes;
+    }
+    (count, error)
+}
+
+fn word_count_from_reader_with<T: WordCountable>(
     mut reader: T,
+    show_bytes: bool,
+    show_chars: bool,
     settings: &Settings,
 ) -> (WordCount, Option<io::Error>) {
     match (
-        settings.show_bytes,
-        settings.show_chars,
+        show_bytes,
+        show_chars,
         settings.show_lines,
         settings.show_max_line_length,
         settings.show_words,

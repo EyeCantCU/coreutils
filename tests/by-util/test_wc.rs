@@ -82,10 +82,46 @@ fn test_stdin_explicit() {
 #[case::stdin_all_counts(&["-c", "-m", "-l", "-L", "-w"], "alice_in_wonderland.txt", "      5      57     302     302      66\n")]
 fn test_wc_fixture(#[case] args: &[&str], #[case] fixture: &str, #[case] expected: &str) {
     new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
         .args(args)
         .pipe_in_fixture(fixture)
         .succeeds()
         .stdout_only(expected);
+}
+
+#[rstest]
+#[case::two_bytes(b"\xC2\xA0", "2\n", "1\n")]
+#[case::three_bytes(b"\xE0\xA0\x80", "3\n", "1\n")]
+#[case::four_bytes(b"\xF0\x90\x80\x80", "4\n", "1\n")]
+fn test_chars_depend_on_locale(
+    #[case] input: &[u8],
+    #[case] single_byte: &str,
+    #[case] utf8: &str,
+) {
+    for locale in ["C", "POSIX"] {
+        new_ucmd!()
+            .env("LC_ALL", locale)
+            .arg("-m")
+            .pipe_in(input)
+            .succeeds()
+            .stdout_only(single_byte);
+    }
+    new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
+        .arg("-m")
+        .pipe_in(input)
+        .succeeds()
+        .stdout_only(utf8);
+}
+
+#[test]
+fn test_chars_single_byte_locale_with_other_counts() {
+    new_ucmd!()
+        .env("LC_ALL", "C")
+        .arg("-lmc")
+        .pipe_in(*b"h\xC3\xA9 \xff\n")
+        .succeeds()
+        .stdout_only("      1       6       6\n");
 }
 
 #[test]
