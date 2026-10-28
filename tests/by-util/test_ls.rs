@@ -4,7 +4,7 @@
 // file that was distributed with this source code.
 
 // spell-checker:ignore (words) READMECAREFULLY birthtime doesntexist oneline somebackup lrwx somefile somegroup somehiddenbackup somehiddenfile tabsize aaaaaaaa bbbb cccc dddddddd ncccc neee naaaaa nbcdef nfffff dired subdired tmpfs mdir COLORTERM mexe bcdef mfoo timefile
-// spell-checker:ignore (words) fakeroot setcap drwxr bcdlps mdangling mentry awith acolons NOFILE NOTCAPABLE
+// spell-checker:ignore (words) fakeroot setcap drwxr bcdlps mdangling mentry awith acolons NOFILE NOTCAPABLE newfstatat readdir
 #![allow(
     clippy::similar_names,
     clippy::too_many_lines,
@@ -8063,4 +8063,45 @@ ls: invalid --block-size argument '1fb'
             .fails_with_code(2)
             .stderr_is("ls: invalid --block-size argument '1fb'\n");
     }
+}
+
+/// An entry that disappears between reading the directory and stating it is
+/// left out of the listing without an error, as GNU does; any other failure
+/// to stat it is still reported. `strace` fakes the failure for `foo`.
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg(not(wasi_runner))]
+fn test_long_entry_vanished_after_readdir() {
+    use std::process::Command;
+
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.touch("foo");
+    scene.fixtures.touch("bar");
+
+    let run = |errno: &str| {
+        Command::new("strace")
+            .args(["--quiet=all", "-o", "/dev/null", "-P", "foo", "-e"])
+            .arg(format!("inject=stat,statx,lstat,newfstatat:error={errno}"))
+            .arg(&scene.bin_path)
+            .arg(scene.util_name.as_str())
+            .args(["-l", "."])
+            .current_dir(scene.fixtures.as_string())
+            .output()
+            .ok()
+    };
+
+    // Skip when strace (or its fault injection) is unavailable.
+    let Some(output) = run("EIO").filter(|o| o.status.code() == Some(1)) else {
+        return;
+    };
+    assert!(!output.stderr.is_empty());
+
+    let output = run("ENOENT").unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert!(
+        stdout.contains("bar") && !stdout.contains("foo"),
+        "{stdout}"
+    );
 }
