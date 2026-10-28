@@ -55,6 +55,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let mut g = Graph::new(input.to_string_lossy().to_string());
 
     if input == "-" {
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        uucore::signals::ensure_stdin_open()
+            .map_err(|e| Error::Read(ReadError::Io(g.name(), e)))?;
         process_input(io::stdin().lock(), &mut g)?;
     } else {
         let mut options: OpenOptions;
@@ -175,7 +178,7 @@ fn process_input<R: BufRead>(reader: R, graph: &mut Graph) -> Result<(), Error> 
         if e.kind() == io::ErrorKind::IsADirectory {
             return Err(ReadError::IsDir(graph.name()).into());
         }
-        return Err(ReadError::Io(e).into());
+        return Err(ReadError::Io(graph.name(), e).into());
     }
 
     if pending.is_some() {

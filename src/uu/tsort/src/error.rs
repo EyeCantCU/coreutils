@@ -5,7 +5,7 @@
 
 use std::io;
 
-use uucore::{display::Quotable as _, translate};
+use uucore::{display::Quotable as _, error::strip_errno, translate};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
@@ -36,6 +36,6 @@ pub(crate) enum ReadError {
     NumTokensOdd(String),
 
     /// Wrapper for bubbling up input IO errors.
-    #[error("{message}: {0}", message = translate!("common-read-error"))]
-    Io(io::Error),
+    #[error("{input}: {message}: {error}", input = .0.maybe_quote(), message = translate!("common-read-error"), error = strip_errno(.1))]
+    Io(String, io::Error),
 }
