@@ -2397,3 +2397,55 @@ fn test_closed_stdout_stays_closed_for_command() {
         .succeeds()
         .stderr_is("closed\n");
 }
+
+#[test]
+fn test_quoting_style() {
+    // QUOTING_STYLE does not affect output that is not a terminal.
+    new_ucmd!()
+        .args(&["-i", "QUOTING_STYLE=c", "a b=c d", "e="])
+        .succeeds()
+        .stdout_only("QUOTING_STYLE=c\na b=c d\ne=\n");
+    for (style, expected) in [
+        ("literal", "a b=c d\ne=\n"),
+        ("shell", "'a b'='c d'\ne=''\n"),
+        ("shell-always", "'a b'='c d'\n'e'=''\n"),
+        ("c", "\"a b\"=\"c d\"\n\"e\"=\"\"\n"),
+    ] {
+        new_ucmd!()
+            .arg(format!("--quoting-style={style}"))
+            .args(&["-i", "a b=c d", "e="])
+            .succeeds()
+            .stdout_only(expected);
+    }
+    new_ucmd!()
+        .args(&["--quoting-style", "shell-escape", "-i", "a=\nb"])
+        .succeeds()
+        .stdout_only("a=''$'\\n''b'\n");
+    new_ucmd!()
+        .args(&["--quoting-style=bogus"])
+        .fails_with_code(125)
+        .no_stdout();
+}
+
+#[cfg(unix)]
+#[test]
+fn test_quoting_style_terminal_default() {
+    // On a terminal, the inherited QUOTING_STYLE selects the style,
+    // shell-escape by default; --null disables quoting.
+    new_ucmd!()
+        .args(&["-i", "a b=c d"])
+        .terminal_simulation(true)
+        .succeeds()
+        .stdout_is("'a b'='c d'\r\n");
+    new_ucmd!()
+        .env("QUOTING_STYLE", "c")
+        .args(&["-i", "a b=c d"])
+        .terminal_simulation(true)
+        .succeeds()
+        .stdout_is("\"a b\"=\"c d\"\r\n");
+    new_ucmd!()
+        .args(&["-i", "-0", "a b=c d"])
+        .terminal_simulation(true)
+        .succeeds()
+        .stdout_is("a b=c d\0");
+}

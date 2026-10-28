@@ -15,6 +15,7 @@ env-help-default-signal = reset handling of SIG signal(s) to the default action
 env-help-block-signal = block delivery of SIG signal(s) while running COMMAND
 env-help-list-signal-handling = list signal handling changes requested by preceding options
 env-help-env0-from = read NUL-terminated environment entries from FILE ('-' for standard input)
+env-help-quoting-style = use quoting style WORD for printed environment entries: literal, locale, shell, shell-always, shell-escape, shell-escape-always, c, c-maybe, escape, clocale
 
 # Error messages
 env-error-missing-closing-quote = no terminating quote in -S string at position { $position } for quote '{ $quote }'
