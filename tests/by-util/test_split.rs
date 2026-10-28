@@ -2353,3 +2353,19 @@ fn test_obsolete_lines_not_read_after_double_dash() {
         .fails()
         .stderr_contains("cannot open '-1' for reading");
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" split -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("split: -: Bad file descriptor\n");
+    assert!(!scene.fixtures.file_exists("xaa"));
+}

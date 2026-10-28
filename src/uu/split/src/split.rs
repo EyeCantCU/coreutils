@@ -1416,6 +1416,9 @@ fn line_bytes(
 
 fn split(settings: &Settings) -> UResult<()> {
     let reader = if settings.input == "-" {
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        uucore::signals::ensure_stdin_open()
+            .map_err_context(|| settings.input.maybe_quote().to_string())?;
         Box::new(stdin()) as Box<dyn Read>
     } else {
         let r = File::open(Path::new(&settings.input)).map_err_context(
