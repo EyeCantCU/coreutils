@@ -485,6 +485,20 @@ fn test_realtime_signal_names() {
         .stderr_contains("sending signal RTMAX to command");
 }
 
+/// The signal reaches the child, and timeout's own group copy does not cause a KILL escalation.
+#[test]
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn test_signal_is_delivered_without_kill_escalation() {
+    for sig in ["INT", "HUP", "USR1", "RTMIN", "RTMAX"] {
+        new_ucmd!()
+            .args(&["-v", "-k", "2", "-s", sig, ".1", "sleep", "10"])
+            .fails_with_code(124)
+            .stderr_only(format!(
+                "timeout: sending signal {sig} to command 'sleep'\n"
+            ));
+    }
+}
+
 /// The whole process tree must be timed out in non-foreground mode, not just
 /// the direct child: a grandchild sequencer (an inner `cmd.exe`) would
 /// otherwise survive the timeout and create the marker file.
