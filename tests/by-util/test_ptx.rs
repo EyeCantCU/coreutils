@@ -303,7 +303,7 @@ fn test_sentence_regexp_invalid_syntax_failure() {
     new_ucmd!()
         .args(&["-S", "^["])
         .fails()
-        .stderr_contains("Invalid regexp");
+        .stderr_contains("Invalid regular expression");
 }
 
 #[test]
@@ -454,7 +454,79 @@ fn test_invalid_regex_word_trailing_backslash() {
 
 #[test]
 fn test_invalid_regex_word_unclosed_group() {
+    // A bare `(` is a plain character in the GNU syntax.
     new_ucmd!().args(&["-W", "(wrong"]).succeeds().no_stderr();
+}
+
+#[test]
+fn test_word_regex_gnu_syntax() {
+    let input = "x (wrong ab+ cd abbb x{2} xx a\\x\n";
+    for (pattern, expected) in [
+        // `(`, `)`, `{` and `}` are plain characters.
+        (
+            "(wrong",
+            ".xx \"\" \"x\" \"(wrong ab+ cd abbb x{2} xx a\\x\" \"\"\n",
+        ),
+        (
+            "x{2}",
+            ".xx \"\" \"x (wrong ab+ cd abbb\" \"x{2} xx a\\x\" \"\"\n",
+        ),
+        // `\|` alternates.
+        (
+            "ab\\|cd",
+            concat!(
+                ".xx \"\" \"x (wrong\" \"ab+ cd abbb x{2} xx a\\x\" \"\"\n",
+                ".xx \"\" \"x (wrong ab+ cd\" \"abbb x{2} xx a\\x\" \"\"\n",
+                ".xx \"\" \"x (wrong ab+\" \"cd abbb x{2} xx a\\x\" \"\"\n",
+            ),
+        ),
+        // `\+` is a plain `+`.
+        (
+            "ab\\+",
+            ".xx \"\" \"x (wrong\" \"ab+ cd abbb x{2} xx a\\x\" \"\"\n",
+        ),
+        // A leading `?` has nothing to repeat and is a plain character.
+        ("?x", ""),
+        // A backslash inside brackets is a plain character.
+        (
+            "[a\\]x",
+            ".xx \"\" \"x (wrong ab+ cd abbb x{2} xx a\" \"\\x\" \"\"\n",
+        ),
+    ] {
+        new_ucmd!()
+            .args(&["-O", "-W", pattern])
+            .pipe_in(input)
+            .succeeds()
+            .stdout_only(expected);
+    }
+}
+
+#[test]
+fn test_invalid_regex_gnu_syntax() {
+    // Unbalanced `\(` and `\)` are errors, as is an unterminated bracket.
+    for pattern in ["\\(ab", "ab\\)", "[a"] {
+        new_ucmd!()
+            .args(&["-W", pattern])
+            .fails_with_code(1)
+            .stderr_only(format!(
+                "ptx: Invalid regular expression (for regexp '{pattern}')\n"
+            ));
+    }
+}
+
+#[test]
+fn test_invalid_regex_reports_pattern() {
+    for opt in ["-S", "-W"] {
+        new_ucmd!()
+            .args(&[opt, "["])
+            .fails_with_code(1)
+            .stderr_only("ptx: Invalid regular expression (for regexp '[')\n");
+    }
+    // The sentence regexp is checked before the word regexp.
+    new_ucmd!()
+        .args(&["-W", "[", "-S", "[a"])
+        .fails_with_code(1)
+        .stderr_only("ptx: Invalid regular expression (for regexp '[a')\n");
 }
 
 #[test]
@@ -467,7 +539,7 @@ fn test_missing_file_error_contains_filename() {
 
 #[test]
 fn test_sentence_regex_trailing_backslash() {
-    // GNU treats a trailing lone backslash as a literal one instead of erroring.
+    // GNU ignores a trailing lone backslash instead of erroring.
     new_ucmd!()
         .args(&["-S", "paris\\"])
         .pipe_in("")
@@ -495,7 +567,7 @@ fn test_nullable_word_regexp_no_empty_matches() {
         "                                  aa   bb cc\n"
     );
     new_ucmd!()
-        .args(&["-W", "[ab]{0,}"])
+        .args(&["-W", "[ab]*"])
         .pipe_in("aa bb cc\n")
         .succeeds()
         .stdout_only(expected);
