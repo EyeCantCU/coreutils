@@ -2497,6 +2497,10 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     // Wait here if `SIGINT` was received,
     // for signal handler to do its work and terminate the program.
     tmp_dir.wait_if_signal();
+    // A diagnostic that could not be written is a sort failure.
+    if uucore::error::stderr_write_failed() {
+        uucore::error::set_exit_code(2);
+    }
     result
 }
 
