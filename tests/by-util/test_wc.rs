@@ -4,6 +4,7 @@
 // file that was distributed with this source code.
 
 #[cfg(unix)]
+use rstest::rstest;
 use uutests::at_and_ucmd;
 use uutests::new_ucmd;
 use uutests::util::vec_of_size;
@@ -62,6 +63,7 @@ fn test_stdin_explicit() {
 #[test]
 fn test_utf8() {
     new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
         .args(&["-lwmcL"])
         .pipe_in_fixture("UTF_8_test.txt")
         .succeeds()
@@ -71,6 +73,7 @@ fn test_utf8() {
 #[test]
 fn test_utf8_words() {
     new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
         .arg("-w")
         .pipe_in_fixture("UTF_8_weirdchars.txt")
         .succeeds()
@@ -80,6 +83,7 @@ fn test_utf8_words() {
 #[test]
 fn test_utf8_line_length_words() {
     new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
         .arg("-Lw")
         .pipe_in_fixture("UTF_8_weirdchars.txt")
         .succeeds()
@@ -89,6 +93,7 @@ fn test_utf8_line_length_words() {
 #[test]
 fn test_utf8_line_length_chars() {
     new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
         .arg("-Lm")
         .pipe_in_fixture("UTF_8_weirdchars.txt")
         .succeeds()
@@ -98,6 +103,7 @@ fn test_utf8_line_length_chars() {
 #[test]
 fn test_utf8_line_length_chars_words() {
     new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
         .arg("-Lmw")
         .pipe_in_fixture("UTF_8_weirdchars.txt")
         .succeeds()
@@ -107,6 +113,7 @@ fn test_utf8_line_length_chars_words() {
 #[test]
 fn test_utf8_chars() {
     new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
         .arg("-m")
         .pipe_in_fixture("UTF_8_weirdchars.txt")
         .succeeds()
@@ -116,6 +123,7 @@ fn test_utf8_chars() {
 #[test]
 fn test_utf8_bytes_chars() {
     new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
         .arg("-cm")
         .pipe_in_fixture("UTF_8_weirdchars.txt")
         .succeeds()
@@ -125,6 +133,7 @@ fn test_utf8_bytes_chars() {
 #[test]
 fn test_utf8_bytes_lines() {
     new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
         .arg("-cl")
         .pipe_in_fixture("UTF_8_weirdchars.txt")
         .succeeds()
@@ -134,6 +143,7 @@ fn test_utf8_bytes_lines() {
 #[test]
 fn test_utf8_bytes_chars_lines() {
     new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
         .arg("-cml")
         .pipe_in_fixture("UTF_8_weirdchars.txt")
         .succeeds()
@@ -143,6 +153,7 @@ fn test_utf8_bytes_chars_lines() {
 #[test]
 fn test_utf8_chars_words() {
     new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
         .arg("-mw")
         .pipe_in_fixture("UTF_8_weirdchars.txt")
         .succeeds()
@@ -152,6 +163,7 @@ fn test_utf8_chars_words() {
 #[test]
 fn test_utf8_line_length_lines() {
     new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
         .arg("-Ll")
         .pipe_in_fixture("UTF_8_weirdchars.txt")
         .succeeds()
@@ -161,6 +173,7 @@ fn test_utf8_line_length_lines() {
 #[test]
 fn test_utf8_line_length_lines_words() {
     new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
         .arg("-Llw")
         .pipe_in_fixture("UTF_8_weirdchars.txt")
         .succeeds()
@@ -170,6 +183,7 @@ fn test_utf8_line_length_lines_words() {
 #[test]
 fn test_utf8_lines_chars() {
     new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
         .arg("-ml")
         .pipe_in_fixture("UTF_8_weirdchars.txt")
         .succeeds()
@@ -179,6 +193,7 @@ fn test_utf8_lines_chars() {
 #[test]
 fn test_utf8_lines_words_chars() {
     new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
         .arg("-mlw")
         .pipe_in_fixture("UTF_8_weirdchars.txt")
         .succeeds()
@@ -188,6 +203,7 @@ fn test_utf8_lines_words_chars() {
 #[test]
 fn test_utf8_line_length_lines_chars() {
     new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
         .arg("-Llm")
         .pipe_in_fixture("UTF_8_weirdchars.txt")
         .succeeds()
@@ -197,10 +213,46 @@ fn test_utf8_line_length_lines_chars() {
 #[test]
 fn test_utf8_all() {
     new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
         .arg("-lwmcL")
         .pipe_in_fixture("UTF_8_weirdchars.txt")
         .succeeds()
         .stdout_is("     25      89     442     513      48\n");
+}
+
+#[rstest]
+#[case::two_bytes(b"\xC2\xA0", "2\n", "1\n")]
+#[case::three_bytes(b"\xE0\xA0\x80", "3\n", "1\n")]
+#[case::four_bytes(b"\xF0\x90\x80\x80", "4\n", "1\n")]
+fn test_chars_depend_on_locale(
+    #[case] input: &[u8],
+    #[case] single_byte: &str,
+    #[case] utf8: &str,
+) {
+    for locale in ["C", "POSIX"] {
+        new_ucmd!()
+            .env("LC_ALL", locale)
+            .arg("-m")
+            .pipe_in(input)
+            .succeeds()
+            .stdout_only(single_byte);
+    }
+    new_ucmd!()
+        .env("LC_ALL", "en_US.UTF-8")
+        .arg("-m")
+        .pipe_in(input)
+        .succeeds()
+        .stdout_only(utf8);
+}
+
+#[test]
+fn test_chars_single_byte_locale_with_other_counts() {
+    new_ucmd!()
+        .env("LC_ALL", "C")
+        .arg("-lmc")
+        .pipe_in(*b"h\xC3\xA9 \xff\n")
+        .succeeds()
+        .stdout_only("      1       6       6\n");
 }
 
 #[test]
