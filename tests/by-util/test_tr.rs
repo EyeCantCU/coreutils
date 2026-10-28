@@ -1606,3 +1606,17 @@ string2 must map all characters in the domain to one
             .stderr_only("tr: the [c*] repeat construct may not appear in string1\n");
     }
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // A stdin closed at startup is reported, not read as empty.
+    let scene = uutests::util::TestScenario::new(uutests::util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" tr a a"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("tr: read error: Bad file descriptor\n");
+}
