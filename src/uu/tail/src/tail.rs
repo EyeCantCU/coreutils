@@ -584,7 +584,7 @@ fn print_target_section<
     let mut stdout = stdout.lock();
     if let Some(limit) = limit {
         #[cfg(any(target_os = "linux", target_os = "android"))]
-        uucore::pipes::send_n_bytes(file, &mut stdout, limit)?;
+        uucore::pipes::send_n_bytes(file, &mut stdout, limit).map_err(io::Error::from)?;
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
             let mut reader = file.take(limit);

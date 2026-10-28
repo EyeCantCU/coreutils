@@ -145,7 +145,7 @@ pub fn splice_unbounded_auto(source: &impl AsFd, dest: &mut impl AsFd) -> Splice
 /// splice `n` bytes with read/write fallback
 /// return actually sent bytes
 #[inline]
-pub fn send_n_bytes(input: impl AsFd, target: impl AsFd, n: u64) -> std::io::Result<u64> {
+pub fn send_n_bytes(input: impl AsFd, target: impl AsFd, n: u64) -> Result<u64, PipeError> {
     let pipe_size = n.min(MAX_ROOTLESS_PIPE_SIZE as u64) as usize;
     let resize = pipe_size > KERNEL_DEFAULT_PIPE_SIZE;
     // improve throughput if output is pipe
@@ -161,7 +161,7 @@ pub fn send_n_bytes(input: impl AsFd, target: impl AsFd, n: u64) -> std::io::Res
         }
         Some(pair)
     }) else {
-        return std::io::copy(&mut RawReader(input).take(n), &mut RawWriter(target));
+        return copy_n_bytes(input, target, n);
     };
     let mut n = n;
     let mut bytes_written: u64 = 0;
@@ -174,7 +174,10 @@ pub fn send_n_bytes(input: impl AsFd, target: impl AsFd, n: u64) -> std::io::Res
             Ok(s) => {
                 n -= s as u64;
                 bytes_written += s as u64;
-                if drain_pipe(&broker_r, &target, s)?.is_err() {
+                if drain_pipe(&broker_r, &target, s)
+                    .map_err(PipeError::Write)?
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -184,8 +187,26 @@ pub fn send_n_bytes(input: impl AsFd, target: impl AsFd, n: u64) -> std::io::Res
     // pipe is empty. Then we can reuse it at next splice.
     PIPE_CACHE.set(Some((broker_r, broker_w)));
     // remove buffering from this fallback by RawReader, or order of output would be wrong with multiple input
-    bytes_written += std::io::copy(&mut RawReader(input).take(n), &mut RawWriter(target))?;
+    bytes_written += copy_n_bytes(input, target, n)?;
     Ok(bytes_written)
+}
+
+/// read/write fallback of [`send_n_bytes`], telling read errors from write errors
+fn copy_n_bytes(input: impl AsFd, target: impl AsFd, n: u64) -> Result<u64, PipeError> {
+    let mut reader = RawReader(input).take(n);
+    let mut writer = RawWriter(target);
+    let mut buf = [0; 8192];
+    let mut copied = 0;
+    loop {
+        let len = match reader.read(&mut buf) {
+            Ok(0) => return Ok(copied),
+            Ok(len) => len,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(PipeError::Read(e)),
+        };
+        writer.write_all(&buf[..len]).map_err(PipeError::Write)?;
+        copied += len as u64;
+    }
 }
 
 /// discard `n` bytes by splice

@@ -41,7 +41,7 @@ use take::take_lines;
 #[derive(Debug, thiserror::Error)]
 enum HeadError {
     /// Wrapper around `io::Error`
-    #[error("{}", translate!("head-error-reading-file", "name" => name.quote(), "err" => err))]
+    #[error("{}", translate!("head-error-reading-file", "name" => name.quote(), "err" => strip_errno(err)))]
     Io { name: PathBuf, err: io::Error },
 
     #[error("{}", translate!("head-error-parse-error", "err" => 0))]
@@ -204,8 +204,68 @@ impl HeadOptions {
     }
 }
 
+/// An error from reading the input, kept apart from the write errors that
+/// [`wrap_in_stdout_error`] labels as such.
+#[derive(Debug)]
+struct ReadFailure(io::Error);
+
+impl std::fmt::Display for ReadFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for ReadFailure {}
+
+type DynError = dyn std::error::Error + Send + Sync;
+
+fn is_read_failure(err: &io::Error) -> bool {
+    err.get_ref().is_some_and(DynError::is::<ReadFailure>)
+}
+
+fn read_failure(err: io::Error) -> io::Error {
+    io::Error::new(err.kind(), ReadFailure(err))
+}
+
+/// Reader marking its errors as [`ReadFailure`]s.
+struct TagReads<R>(R);
+
+impl<R: Read> Read for TagReads<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf).map_err(|e| {
+            if e.kind() == io::ErrorKind::Interrupted {
+                e
+            } else {
+                read_failure(e)
+            }
+        })
+    }
+}
+
+/// Reports a read error on the input `name`, which ends only that input;
+/// any other error is returned.
+fn report_read_error(result: io::Result<u64>, name: impl Into<PathBuf>) -> io::Result<u64> {
+    match result {
+        Err(err) if is_read_failure(&err) => {
+            let err = match err.into_inner().map(DynError::downcast::<ReadFailure>) {
+                Some(Ok(failure)) => failure.0,
+                _ => unreachable!("checked to be a ReadFailure"),
+            };
+            show!(HeadError::Io {
+                name: name.into(),
+                err
+            });
+            Ok(0)
+        }
+        result => result,
+    }
+}
+
 #[inline]
 fn wrap_in_stdout_error(err: io::Error) -> io::Error {
+    if is_read_failure(&err) {
+        return err;
+    }
     io::Error::new(
         err.kind(),
         translate!("head-error-writing-stdout", "err" => strip_errno(&err)),
@@ -216,13 +276,16 @@ fn wrap_in_stdout_error(err: io::Error) -> io::Error {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn print_n_bytes(input: impl AsFd, n: u64) -> io::Result<u64> {
     let out = io::stdout();
-    uucore::pipes::send_n_bytes(input, &out, n).map_err(wrap_in_stdout_error)
+    uucore::pipes::send_n_bytes(input, &out, n).map_err(|e| match e {
+        uucore::pipes::PipeError::Read(e) => read_failure(e),
+        uucore::pipes::PipeError::Write(e) => wrap_in_stdout_error(e),
+    })
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn print_n_bytes(input: impl Read, n: u64) -> io::Result<u64> {
     // Read the first `n` bytes from the `input` reader.
-    let mut reader = input.take(n);
+    let mut reader = TagReads(input).take(n);
 
     // Write those bytes to `stdout`.
     let stdout = io::stdout();
@@ -348,7 +411,7 @@ where
         bytes_remaining_to_search -= bytes_to_read_this_loop;
 
         input.seek(SeekFrom::Start(read_start_offset))?;
-        input.read_exact(buffer)?;
+        input.read_exact(buffer).map_err(read_failure)?;
 
         // Unfortunately need special handling for the case that the input file doesn't have
         // a terminating `separator` character.
@@ -403,8 +466,10 @@ fn head_backwards_file(input: &mut File, options: &HeadOptions) -> io::Result<u6
 
 fn head_backwards_without_seek_file(input: &mut File, options: &HeadOptions) -> io::Result<u64> {
     match options.mode {
-        Mode::AllButLastBytes(n) => print_but_last_n_bytes(input, n),
-        Mode::AllButLastLines(n) => print_but_last_n_lines(input, n, options.line_ending.into()),
+        Mode::AllButLastBytes(n) => print_but_last_n_bytes(TagReads(input), n),
+        Mode::AllButLastLines(n) => {
+            print_but_last_n_lines(TagReads(input), n, options.line_ending.into())
+        }
         _ => unreachable!(),
     }
 }
@@ -431,7 +496,7 @@ fn head_file(input: &mut File, options: &HeadOptions) -> io::Result<u64> {
     match options.mode {
         Mode::FirstBytes(n) => print_n_bytes(input, n),
         Mode::FirstLines(n) => print_n_lines(
-            &mut io::BufReader::with_capacity(BUF_SIZE, input),
+            &mut io::BufReader::with_capacity(BUF_SIZE, TagReads(input)),
             n,
             options.line_ending.into(),
         ),
@@ -452,6 +517,11 @@ fn uu_head(options: &HeadOptions) -> UResult<()> {
                 let name = locale_aware_shell_escape(translate!("head-name-stdin"));
                 writeln!(stdout, "==> {name} <==")?;
             }
+            #[cfg(all(unix, not(target_os = "fuchsia")))]
+            uucore::signals::ensure_stdin_open().map_err(|err| HeadError::Io {
+                name: "standard input".into(),
+                err,
+            })?;
             let stdin = io::stdin();
 
             #[cfg(unix)]
@@ -464,10 +534,11 @@ fn uu_head(options: &HeadOptions) -> UResult<()> {
                     // last byte read so that any tools that parse the remainder of
                     // the stdin stream read from the correct place.
 
-                    let bytes_read = head_file(&mut stdin_file, options)?;
+                    let bytes_read =
+                        report_read_error(head_file(&mut stdin_file, options), "standard input")?;
                     stdin_file.seek(SeekFrom::Start(current_pos + bytes_read))?;
                 } else {
-                    let _bytes_read = head_file(&mut stdin_file, options)?;
+                    report_read_error(head_file(&mut stdin_file, options), "standard input")?;
                 }
             }
 
@@ -544,7 +615,9 @@ fn uu_head(options: &HeadOptions) -> UResult<()> {
             };
 
             print_header()?;
-            if metadata.is_dir() {
+            // Reading a directory fails with EISDIR on Linux, so let the read
+            // report it (or any other read error) there.
+            if cfg!(not(any(target_os = "linux", target_os = "android"))) && metadata.is_dir() {
                 if !zero_output {
                     show!(USimpleError::new(
                         1,
@@ -553,7 +626,7 @@ fn uu_head(options: &HeadOptions) -> UResult<()> {
                 }
                 continue;
             }
-            head_file(&mut file_handle, options)?;
+            report_read_error(head_file(&mut file_handle, options), file)?;
             Ok(())
         };
         if let Err(err) = res {
