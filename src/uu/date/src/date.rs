@@ -1014,19 +1014,192 @@ fn split_format(format: &[u8]) -> Vec<FormatChunk<'_>> {
     chunks
 }
 
+/// A run of `count` copies of `pad`, written before `bytes[offset..]` of a
+/// [`FormattedLine`].
+struct PaddingRun {
+    offset: usize,
+    pad: char,
+    count: u64,
+}
+
+/// A formatted line. The padding of a field wider than
+/// [`format_modifiers::MAX_FORMAT_WIDTH`] can be far too large to hold in
+/// memory, so it is kept as a [`PaddingRun`] and only produced while writing.
+#[derive(Default)]
+struct FormattedLine {
+    bytes: Vec<u8>,
+    padding: Vec<PaddingRun>,
+    /// Set when a field could not be produced: the line stops before it, and
+    /// this error is reported once the line has been written.
+    error: Option<String>,
+}
+
+impl FormattedLine {
+    /// The length of the line, in bytes.
+    fn len(&self) -> u64 {
+        let padding = self
+            .padding
+            .iter()
+            .map(|run| (run.pad.len_utf8() as u64).saturating_mul(run.count));
+        padding.fold(self.bytes.len() as u64, u64::saturating_add)
+    }
+
+    fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        let mut start = 0;
+        for run in &self.padding {
+            writer.write_all(&self.bytes[start..run.offset])?;
+            write_padding(writer, run.pad, run.count)?;
+            start = run.offset;
+        }
+        writer.write_all(&self.bytes[start..])
+    }
+}
+
+/// Write `count` copies of `pad` a block at a time.
+fn write_padding<W: Write>(writer: &mut W, pad: char, count: u64) -> std::io::Result<()> {
+    const BLOCK_CHARS: u64 = 8192;
+    let mut encoded = [0; 4];
+    let encoded = pad.encode_utf8(&mut encoded).as_bytes();
+    let block = encoded.repeat(BLOCK_CHARS as usize);
+    let mut remaining = count;
+    while remaining > 0 {
+        let chars = remaining.min(BLOCK_CHARS);
+        writer.write_all(&block[..chars as usize * encoded.len()])?;
+        remaining -= chars;
+    }
+    Ok(())
+}
+
+/// Find the first conversion in `fmt` whose width is too large to pad in
+/// memory, returning its offset and the parsed conversion.
+fn find_wide_spec(fmt: &str) -> Option<(usize, format_modifiers::ParsedSpec<'_>)> {
+    let mut i = 0;
+    while let Some(offset) = fmt[i..].find('%') {
+        i += offset;
+        if fmt[i + 1..].starts_with('%') {
+            i += 2;
+            continue;
+        }
+        match format_modifiers::parse_format_spec(&fmt[i..]) {
+            Some(parsed)
+                if parsed
+                    .width
+                    .is_some_and(|width| width > format_modifiers::MAX_FORMAT_WIDTH) =>
+            {
+                return Some((i, parsed));
+            }
+            Some(parsed) => i += parsed.len,
+            None => i += 1,
+        }
+    }
+    None
+}
+
+/// Append the conversion `parsed`, found at the start of `fmt`, whose width is
+/// above [`format_modifiers::MAX_FORMAT_WIDTH`], to `line`. Returns `false`,
+/// after recording the error in `line`, when the field cannot be produced.
+///
+/// The field is formatted with the largest width padded in memory and with
+/// one less. The two results differ by a single padding character, which
+/// locates the padding and its character for any flags and conversion, and
+/// the remaining padding is added there as a [`PaddingRun`].
+fn push_wide_field(
+    line: &mut FormattedLine,
+    fmt: &str,
+    parsed: &format_modifiers::ParsedSpec<'_>,
+    format_chunk: &mut impl FnMut(&str) -> Result<String, String>,
+) -> Result<bool, String> {
+    let width_start = 1 + parsed.flags.len();
+    let width_text = &fmt[width_start..parsed.len - parsed.spec.len()];
+    let too_large = || {
+        translate!(
+            "date-error-format-modifier-width-too-large",
+            "width" => width_text,
+            "specifier" => parsed.spec
+        )
+    };
+    // The width is all digits, so it parses as an `i64` exactly when it is
+    // not above `i64::MAX`.
+    let Ok(width) = width_text.parse::<i64>().map(i64::unsigned_abs) else {
+        line.error = Some(too_large());
+        return Ok(false);
+    };
+
+    let probe = format_modifiers::MAX_FORMAT_WIDTH;
+    let flags = parsed.flags;
+    let spec = parsed.spec;
+    let wide = format_chunk(&format!("%{flags}{probe}{spec}"))?;
+    let narrow = format_chunk(&format!("%{flags}{}{spec}", probe - 1))?;
+
+    let mut run = None;
+    if wide != narrow {
+        let (offset, pad) = wide
+            .char_indices()
+            .zip(narrow.chars())
+            .find(|((_, w), n)| w != n)
+            .map(|((offset, w), _)| (offset, w))
+            .or_else(|| wide.chars().last().map(|w| (wide.len() - w.len_utf8(), w)))
+            .unwrap_or((0, ' '));
+        run = Some((offset, pad, width - probe as u64));
+    }
+
+    let field_len = run.map_or(0, |(_, pad, count)| {
+        (pad.len_utf8() as u64).saturating_mul(count)
+    });
+    let line_len = line
+        .len()
+        .saturating_add(wide.len() as u64)
+        .saturating_add(field_len);
+    if line_len > i64::MAX as u64 {
+        line.error = Some(too_large());
+        return Ok(false);
+    }
+
+    match run {
+        Some((offset, pad, count)) => {
+            line.bytes.extend_from_slice(&wide.as_bytes()[..offset]);
+            line.padding.push(PaddingRun {
+                offset: line.bytes.len(),
+                pad,
+                count,
+            });
+            line.bytes.extend_from_slice(&wide.as_bytes()[offset..]);
+        }
+        None => line.bytes.extend_from_slice(wide.as_bytes()),
+    }
+    Ok(true)
+}
+
 /// Format each UTF-8 chunk with `format_chunk` and pass the other bytes through.
+/// A conversion wider than [`format_modifiers::MAX_FORMAT_WIDTH`] is formatted
+/// by itself so that its padding is never held in memory.
 fn format_chunks(
     chunks: &[FormatChunk],
     mut format_chunk: impl FnMut(&str) -> Result<String, String>,
-) -> Result<Vec<u8>, String> {
-    let mut output = Vec::new();
+) -> Result<FormattedLine, String> {
+    let mut line = FormattedLine::default();
     for chunk in chunks {
         match chunk {
-            FormatChunk::Specifiers(fmt) => output.extend_from_slice(format_chunk(fmt)?.as_bytes()),
-            FormatChunk::RawBytes(bytes) => output.extend_from_slice(bytes),
+            FormatChunk::Specifiers(fmt) => {
+                let mut rest = *fmt;
+                while let Some((start, parsed)) = find_wide_spec(rest) {
+                    if start > 0 {
+                        line.bytes
+                            .extend_from_slice(format_chunk(&rest[..start])?.as_bytes());
+                    }
+                    if !push_wide_field(&mut line, &rest[start..], &parsed, &mut format_chunk)? {
+                        return Ok(line);
+                    }
+                    rest = &rest[start + parsed.len..];
+                }
+                if !rest.is_empty() || fmt.is_empty() {
+                    line.bytes.extend_from_slice(format_chunk(rest)?.as_bytes());
+                }
+            }
+            FormatChunk::RawBytes(bytes) => line.bytes.extend_from_slice(bytes),
         }
     }
-    Ok(output)
+    Ok(line)
 }
 
 /// The format string, its chunks and the formatter config, shared by the
@@ -1105,14 +1278,17 @@ fn write_formatted_date<W: Write>(
 /// `InvalidFormat` after flushing what made it out.
 fn write_formatted_bytes<W: Write>(
     writer: &mut W,
-    formatted: Result<Vec<u8>, String>,
+    formatted: Result<FormattedLine, String>,
     output: &OutputContext,
 ) -> UResult<()> {
     match formatted {
-        Ok(bytes) => {
-            writer.write_all(&bytes).map_err(DateError::Write)?;
+        Ok(line) => {
+            line.write_to(writer).map_err(DateError::Write)?;
             writer.write_all(b"\n").map_err(DateError::Write)?;
-            Ok(())
+            match line.error {
+                Some(e) => write_formatted_bytes(writer, Err(e), output),
+                None => Ok(()),
+            }
         }
         Err(e) => {
             let _ = writer.flush();
@@ -1156,7 +1332,7 @@ fn format_extended_default(
     config: &Config<PosixCustom>,
     output_time_zone: &TimeZone,
     plus_extended_year: bool,
-) -> Result<Vec<u8>, String> {
+) -> Result<FormattedLine, String> {
     // Apply the output timezone to an equivalent in-range instant, then let the
     // existing formatter handle every field except the real extended year.
     let utc = ExtendedDateTime::from_unix_seconds(date.unix_seconds(), date.nanosecond, 0)

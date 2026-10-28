@@ -41,11 +41,11 @@ use std::fmt;
 use uucore::translate;
 
 /// Upper bound on the field width we will allocate for. Anything wider is
-/// rejected as `FieldWidthTooLarge` instead of being handed to the allocator.
-/// A huge request (e.g. `%6666666666666D`) would otherwise abort the process
-/// under a sanitizer before `try_reserve` could fail gracefully, and OOM
-/// elsewhere.
-const MAX_FORMAT_WIDTH: usize = u16::MAX as usize;
+/// rejected here as `FieldWidthTooLarge` instead of being handed to the
+/// allocator: a huge request (e.g. `%6666666666666D`) would otherwise abort the
+/// process under a sanitizer before `try_reserve` could fail gracefully, and
+/// OOM elsewhere. The caller writes the padding of wider fields as a stream.
+pub(crate) const MAX_FORMAT_WIDTH: usize = u16::MAX as usize;
 
 #[derive(Clone, Copy)]
 pub(super) enum Pad {
