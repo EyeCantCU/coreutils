@@ -494,6 +494,33 @@ fn test_total_only() {
         .stdout_is("31 313 1887\n");
 }
 
+#[cfg(all(unix, target_pointer_width = "64"))]
+#[test]
+fn test_total_overflow_saturates() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    // Eight sparse 2 EiB files add up to one more than u64::MAX bytes.
+    let big = at.make_file("big");
+    if big.set_len(1 << 61).is_err() {
+        // The file system does not support files this large.
+        return;
+    }
+    let args = ["-c", "big", "big", "big", "big", "big", "big", "big", "big"];
+
+    ucmd.arg("--total=only")
+        .args(&args)
+        .fails_with_code(1)
+        .stdout_is("18446744073709551615\n")
+        .stderr_is("wc: total bytes: Value too large for defined data type\n");
+
+    new_ucmd!()
+        .current_dir(at.as_string())
+        .arg("--total=never")
+        .args(&args)
+        .succeeds()
+        .stdout_is(" 2305843009213693952 big\n".repeat(8))
+        .no_stderr();
+}
+
 #[test]
 fn test_zero_length_files() {
     // A trailing zero is ignored, but otherwise empty file names are an error...

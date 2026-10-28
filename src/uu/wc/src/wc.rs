@@ -40,7 +40,7 @@ use uucore::{
 use crate::{
     count_fast::{count_bytes_chars_and_lines_fast, count_bytes_fast},
     countable::WordCountable,
-    word_count::WordCount,
+    word_count::{CountOverflow, WordCount},
 };
 
 /// The minimum character width for formatting counts when reading from stdin.
@@ -767,7 +767,7 @@ fn compute_number_width(inputs: &Inputs, settings: &Settings) -> usize {
                     Input::Path(path) => {
                         if let Ok(meta) = fs::metadata(path) {
                             if meta.is_file() {
-                                total += meta.len();
+                                total = total.saturating_add(meta.len());
                             } else {
                                 minimum_width = MINIMUM_WIDTH;
                             }
@@ -785,6 +785,18 @@ fn compute_number_width(inputs: &Inputs, settings: &Settings) -> usize {
                 max(total_width, minimum_width)
             }
         }
+    }
+}
+
+/// The error reported when a total does not fit in its counter.
+fn value_too_large() -> io::Error {
+    #[cfg(unix)]
+    {
+        io::Error::from_raw_os_error(libc::EOVERFLOW)
+    }
+    #[cfg(not(unix))]
+    {
+        io::Error::from(io::ErrorKind::FileTooLarge)
     }
 }
 
@@ -923,6 +935,7 @@ pub(crate) fn wc_simd_allowed(policy: &SimdPolicy) -> bool {
 
 fn wc(inputs: &Inputs, settings: &Settings) -> UResult<()> {
     let mut total_word_count = WordCount::default();
+    let mut total_overflow = CountOverflow::default();
     let mut num_inputs: usize = 0;
 
     let (number_width, are_stats_visible) = match settings.total_when {
@@ -990,7 +1003,7 @@ fn wc(inputs: &Inputs, settings: &Settings) -> UResult<()> {
                 continue;
             }
         };
-        total_word_count += word_count;
+        total_word_count.add_saturating(&word_count, &mut total_overflow);
         if are_stats_visible {
             let maybe_title = input.to_title();
             let maybe_title_str = maybe_title.as_deref();
@@ -1008,6 +1021,17 @@ fn wc(inputs: &Inputs, settings: &Settings) -> UResult<()> {
     }
 
     if settings.total_when.is_total_row_visible(num_inputs) {
+        // A total too large to represent is shown as the largest value, with a diagnostic.
+        for (overflowed, counter) in [
+            (total_overflow.lines, translate!("wc-error-total-lines")),
+            (total_overflow.words, translate!("wc-error-total-words")),
+            (total_overflow.chars, translate!("wc-error-total-chars")),
+            (total_overflow.bytes, translate!("wc-error-total-bytes")),
+        ] {
+            if overflowed {
+                show!(value_too_large().map_err_context(|| counter));
+            }
+        }
         let wc_total_msg = translate!("wc-total");
         let title = are_stats_visible.then_some(OsStr::new(&wc_total_msg));
         if let Err(err) = print_stats(settings, &total_word_count, title, number_width) {
