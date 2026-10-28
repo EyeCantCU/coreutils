@@ -2,3 +2,6 @@ printenv-about = Display the values of the specified environment VARIABLE(s), or
 printenv-usage = printenv [OPTION]... [VARIABLE]...
 
 printenv-help-null = end each output line with 0 byte rather than newline
+printenv-help-quoting-style = use quoting style WORD for names and values:
+  literal, locale, shell, shell-always, shell-escape, shell-escape-always, c, c-maybe, escape, clocale
+printenv-invalid-quoting-style-env-var = ignoring invalid value of environment variable QUOTING_STYLE: { $invalid }

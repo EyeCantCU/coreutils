@@ -131,3 +131,78 @@ fn test_non_utf8_env_vars() {
         .succeeds()
         .stdout_contains_bytes(b"NON_UTF8_VAR=hello\x80world");
 }
+
+#[test]
+fn test_quoting_style_env_ignored_when_redirected() {
+    for style in ["shell", "c", "invalid"] {
+        new_ucmd!()
+            .env("QUOTING_STYLE", style)
+            .env("a b", "c d")
+            .succeeds()
+            .stdout_contains("\na b=c d\n")
+            .no_stderr();
+        new_ucmd!()
+            .env("QUOTING_STYLE", style)
+            .env("a b", "c d")
+            .arg("a b")
+            .succeeds()
+            .stdout_only("c d\n");
+    }
+}
+
+#[test]
+fn test_quoting_style_option() {
+    for (style, expected) in [
+        ("literal", "\na b=c d\n"),
+        ("shell", "\n'a b'='c d'\n"),
+        ("c", "\n\"a b\"=\"c d\"\n"),
+        ("shell-a", "\n'a b'='c d'\n"),
+    ] {
+        new_ucmd!()
+            .env("QUOTING_STYLE", "literal")
+            .env("a b", "c d")
+            .arg(format!("--quoting-style={style}"))
+            .succeeds()
+            .stdout_contains(expected)
+            .no_stderr();
+    }
+    new_ucmd!().arg("--quoting-style=bogus").fails().no_stdout();
+}
+
+#[test]
+#[cfg(unix)]
+fn test_quoting_style_on_terminal() {
+    use uutests::util::TerminalSimulation;
+    let stdout_tty = || TerminalSimulation {
+        stdout: true,
+        ..Default::default()
+    };
+    for (style, expected) in [
+        (None, "'c d'\r\n'y'$'\\t''z'\r\n"),
+        (Some("literal"), "c d\r\ny\tz\r\n"),
+        (Some("shell"), "'c d'\r\n'y\tz'\r\n"),
+        (Some("c"), "\"c d\"\r\n\"y\\tz\"\r\n"),
+        (Some("escape"), "c d\r\ny\\tz\r\n"),
+    ] {
+        let mut cmd = new_ucmd!();
+        if let Some(style) = style {
+            cmd.env("QUOTING_STYLE", style);
+        }
+        cmd.env("a b", "c d")
+            .env("x", "y\tz")
+            .args(&["a b", "x"])
+            .terminal_sim_stdio(stdout_tty())
+            .succeeds()
+            .stdout_only(expected);
+    }
+    new_ucmd!()
+        .env("QUOTING_STYLE", "invalid")
+        .env("a b", "c d")
+        .arg("a b")
+        .terminal_sim_stdio(stdout_tty())
+        .succeeds()
+        .stdout_is("'c d'\r\n")
+        .stderr_is(
+            "printenv: ignoring invalid value of environment variable QUOTING_STYLE: 'invalid'\n",
+        );
+}
