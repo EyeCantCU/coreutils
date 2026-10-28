@@ -29,6 +29,9 @@ notify = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["fs", "process"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["event", "fs"] }
+
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 uucore = { workspace = true, features = ["pipes"] }
 

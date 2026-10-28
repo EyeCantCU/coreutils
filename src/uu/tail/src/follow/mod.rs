@@ -5,6 +5,8 @@
 
 #[cfg(not(target_os = "wasi"))]
 mod files;
+#[cfg(target_os = "linux")]
+mod inotify;
 #[cfg(not(target_os = "wasi"))]
 mod watch;
 

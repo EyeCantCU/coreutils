@@ -5,6 +5,8 @@
 
 // spell-checker:ignore (ToDO) tailable untailable stdlib kqueue Uncategorized unwatch
 
+#[cfg(target_os = "linux")]
+use super::inotify::InotifyWatcher;
 use crate::args::{FollowMode, Settings};
 use crate::follow::files::{FileHandling, PathData};
 use crate::paths::{Input, InputKind, MetadataExtTail, PathExtTail};
@@ -12,7 +14,8 @@ use crate::{platform, text};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher, WatcherKind};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, channel};
+use std::sync::mpsc::{self, Receiver, TryRecvError, channel};
+use std::time::Duration;
 use uucore::display::Quotable;
 use uucore::error::{UResult, USimpleError, set_exit_code};
 #[cfg(target_os = "linux")]
@@ -22,8 +25,18 @@ use uucore::translate;
 use uucore::show_error;
 
 pub struct WatcherRx {
-    watcher: Box<dyn Watcher>,
-    receiver: Receiver<Result<notify::Event, notify::Error>>,
+    backend: Backend,
+}
+
+enum Backend {
+    /// A `notify` watcher, which reports its events from a thread of its own.
+    Notify {
+        watcher: Box<dyn Watcher>,
+        receiver: Receiver<Result<notify::Event, notify::Error>>,
+    },
+    /// An inotify instance read by the thread that follows the files.
+    #[cfg(target_os = "linux")]
+    Inotify(InotifyWatcher),
 }
 
 impl WatcherRx {
@@ -31,7 +44,61 @@ impl WatcherRx {
         watcher: Box<dyn Watcher>,
         receiver: Receiver<Result<notify::Event, notify::Error>>,
     ) -> Self {
-        Self { watcher, receiver }
+        Self {
+            backend: Backend::Notify { watcher, receiver },
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn from_inotify(watcher: InotifyWatcher) -> Self {
+        Self {
+            backend: Backend::Inotify(watcher),
+        }
+    }
+
+    /// Wait at most `timeout` for the next event.
+    fn recv_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<notify::Result<notify::Event>, mpsc::RecvTimeoutError> {
+        match &mut self.backend {
+            Backend::Notify { receiver, .. } => receiver.recv_timeout(timeout),
+            #[cfg(target_os = "linux")]
+            Backend::Inotify(watcher) => watcher.recv_timeout(timeout),
+        }
+    }
+
+    /// Return the next event if one is available.
+    fn try_recv(&mut self) -> Result<notify::Result<notify::Event>, TryRecvError> {
+        match &mut self.backend {
+            Backend::Notify { receiver, .. } => receiver.try_recv(),
+            #[cfg(target_os = "linux")]
+            Backend::Inotify(watcher) => watcher.try_recv(),
+        }
+    }
+
+    /// How often to look for further events after one arrived. Events of
+    /// `notify` come from another thread, which may need a few chances to
+    /// deliver the ones that are pending; an inotify read returns them all.
+    fn drain_rounds(&self) -> usize {
+        match self.backend {
+            Backend::Notify { .. } => 100,
+            #[cfg(target_os = "linux")]
+            Backend::Inotify(_) => 1,
+        }
+    }
+
+    /// Watch the regular file the name `path` refers to, now and after it
+    /// is replaced, when the backend can watch it apart from its directory.
+    fn follow_file(&mut self, path: &Path) {
+        match &mut self.backend {
+            // `notify` watches the directory only.
+            Backend::Notify { .. } => {
+                let _ = path;
+            }
+            #[cfg(target_os = "linux")]
+            Backend::Inotify(watcher) => watcher.follow_file(path),
+        }
     }
 
     /// Wrapper for `notify::Watcher::watch` to also add the parent directory of `path` if necessary.
@@ -39,6 +106,7 @@ impl WatcherRx {
         let mut path = path.to_owned();
         #[cfg(target_os = "linux")]
         if path.is_file() {
+            self.follow_file(&path);
             /*
             NOTE: Using the parent directory instead of the file is a workaround.
             This workaround follows the recommendation of the notify crate authors:
@@ -71,15 +139,21 @@ impl WatcherRx {
     }
 
     fn watch(&mut self, path: &Path, mode: RecursiveMode) -> UResult<()> {
-        self.watcher
-            .watch(path, mode)
-            .map_err(|err| USimpleError::new(1, err.to_string()))
+        match &mut self.backend {
+            Backend::Notify { watcher, .. } => watcher.watch(path, mode),
+            #[cfg(target_os = "linux")]
+            Backend::Inotify(watcher) => watcher.watch(path),
+        }
+        .map_err(|err| USimpleError::new(1, err.to_string()))
     }
 
     fn unwatch(&mut self, path: &Path) -> UResult<()> {
-        self.watcher
-            .unwatch(path)
-            .map_err(|err| USimpleError::new(1, err.to_string()))
+        match &mut self.backend {
+            Backend::Notify { watcher, .. } => watcher.unwatch(path),
+            #[cfg(target_os = "linux")]
+            Backend::Inotify(watcher) => watcher.unwatch(path),
+        }
+        .map_err(|err| USimpleError::new(1, err.to_string()))
     }
 }
 
@@ -179,6 +253,18 @@ impl Observer {
             return Ok(());
         }
 
+        // On Linux, use an inotify instance of our own when there is no
+        // reason to poll: its watches are then added and removed by this
+        // thread, and the file itself can be watched next to its directory.
+        // `notify` is the fallback if it cannot be created.
+        #[cfg(target_os = "linux")]
+        if !self.use_polling
+            && let Ok(watcher) = InotifyWatcher::new()
+        {
+            self.watcher_rx = Some(WatcherRx::from_inotify(watcher));
+            return self.init_files(&settings.inputs);
+        }
+
         let (tx, rx) = channel();
 
         /*
@@ -275,6 +361,7 @@ impl Observer {
                             watcher_rx.watch_with_parent(&path)?;
                         } else if let Some(active_parent) = path.parent().filter(|p| p.is_dir()) {
                             // If `path` is not a tailable file, add its parent to `Watcher`.
+                            watcher_rx.follow_file(&path);
                             watcher_rx.watch(active_parent, RecursiveMode::NonRecursive)?;
                             // Add symlinks to orphans for retry polling (target may not exist)
                             if path.is_symlink() {
@@ -389,7 +476,7 @@ impl Observer {
                                 "{}",
                                 translate!("tail-status-replaced-with-untailable-file-giving-up", "file" => display_name.quote())
                             );
-                            let _ = self.watcher_rx.as_mut().unwrap().watcher.unwatch(event_path);
+                            let _ = self.watcher_rx.as_mut().unwrap().unwatch(event_path);
                             self.files.remove(event_path);
                             if self.files.no_files_remaining(settings) {
                                 return Err(USimpleError::new(1, translate!("tail-no-files-remaining")));
@@ -562,7 +649,6 @@ pub fn follow(mut observer: Observer, settings: &Settings) -> UResult<()> {
             .watcher_rx
             .as_mut()
             .unwrap()
-            .receiver
             .recv_timeout(settings.sleep_sec);
 
         if rx_result.is_ok() {
@@ -602,10 +688,8 @@ pub fn follow(mut observer: Observer, settings: &Settings) -> UResult<()> {
                 // are queued (e.g., after resuming from SIGSTOP).
                 // Multiple iterations with spin_loop hints give the notify
                 // background thread chances to deliver pending events.
-                for _ in 0..100 {
-                    while let Ok(Ok(event)) =
-                        observer.watcher_rx.as_mut().unwrap().receiver.try_recv()
-                    {
+                for _ in 0..observer.watcher_rx.as_ref().unwrap().drain_rounds() {
+                    while let Ok(Ok(event)) = observer.watcher_rx.as_mut().unwrap().try_recv() {
                         process_event(&mut observer, event, settings, &mut paths)?;
                     }
                     // Use both yield and spin hint for broader CPU support
@@ -618,12 +702,7 @@ pub fn follow(mut observer: Observer, settings: &Settings) -> UResult<()> {
                 paths,
             })) if e.kind() == std::io::ErrorKind::NotFound => {
                 if let Some(event_path) = paths.first().filter(|p| observer.files.contains_key(p)) {
-                    let _ = observer
-                        .watcher_rx
-                        .as_mut()
-                        .unwrap()
-                        .watcher
-                        .unwatch(event_path);
+                    let _ = observer.watcher_rx.as_mut().unwrap().unwatch(event_path);
                 }
             }
             Ok(Err(notify::Error {
