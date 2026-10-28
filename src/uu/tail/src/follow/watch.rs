@@ -433,13 +433,10 @@ impl Observer {
                             let _ = self.watcher_rx.as_mut().unwrap().unwatch(event_path);
                         }
                     } else {
-                        show_error!(
-                            "{}: {}",
-                            display_name,
-                            translate!("tail-no-such-file-or-directory")
-                        );
-                        if !self.files.files_remaining() && self.use_polling {
-                            // NOTE: GNU's tail exits here for `---disable-inotify`
+                        if self.files.get(event_path).reader.is_some() {
+                            report_inaccessible(&display_name);
+                        }
+                        if !self.files.files_remaining() {
                             return Err(USimpleError::new(1, translate!("tail-no-files-remaining")));
                         }
                     }
@@ -498,6 +495,16 @@ impl Observer {
         }
         Ok(paths)
     }
+}
+
+/// A followed name that no longer leads to a file.
+fn report_inaccessible(display_name: &str) {
+    show_error!(
+        "{} {}: {}",
+        display_name.quote(),
+        translate!("tail-become-inaccessible"),
+        translate!("tail-no-such-file-or-directory")
+    );
 }
 
 #[allow(clippy::cognitive_complexity)]

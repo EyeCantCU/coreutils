@@ -2137,22 +2137,16 @@ fn test_follow_name_remove() {
     at.copy(source, source_copy);
 
     let expected_stdout = at.read(FOLLOW_NAME_SHORT_EXP);
-    let expected_stderr = [
-        format!(
-            "{}: {source_copy}: No such file or directory\n{0}: no files remaining\n",
-            ts.util_name,
-        ),
-        format!(
-            "{}: {source_copy}: No such file or directory\n",
-            ts.util_name,
-        ),
-    ];
+    let expected_stderr = format!(
+        "{}: '{source_copy}' has become inaccessible: No such file or directory\n\
+         {0}: no files remaining\n",
+        ts.util_name,
+    );
 
     let mut args = vec!["--follow=name", source_copy, "--use-polling"];
 
     let mut delay = 1500;
-    #[allow(clippy::needless_range_loop)]
-    for i in 0..2 {
+    for _ in 0..2 {
         at.copy(source, source_copy);
 
         let mut p = ts.ucmd().args(&args).run_no_wait();
@@ -2162,21 +2156,12 @@ fn test_follow_name_remove() {
         at.remove(source_copy);
         p.delay(delay);
 
-        if i == 0 {
-            p.make_assertion()
-                .is_not_alive()
-                .with_all_output()
-                .stdout_is(&expected_stdout)
-                .stderr_is(&expected_stderr[i])
-                .failure();
-        } else {
-            p.make_assertion().is_alive();
-            p.kill()
-                .make_assertion()
-                .with_all_output()
-                .stdout_is(&expected_stdout)
-                .stderr_is(&expected_stderr[i]);
-        }
+        p.make_assertion()
+            .is_not_alive()
+            .with_all_output()
+            .stdout_is(&expected_stdout)
+            .stderr_is(&expected_stderr)
+            .failure();
 
         args.pop();
         delay /= 3;
@@ -2435,6 +2420,7 @@ fn test_follow_detects_file_truncation() {
 fn test_follow_name_move_create1() {
     // This test triggers a move/create event while `tail --follow=name file` is running.
     // ((sleep 2 && mv file backup && sleep 2 && cp backup file &)>/dev/null 2>&1 &) ; tail --follow=name file
+    // Without --retry, tail gives up as soon as the name is gone.
 
     let ts = TestScenario::new(util_name!());
     let at = &ts.fixtures;
@@ -2442,22 +2428,12 @@ fn test_follow_name_move_create1() {
     let source = FOLLOW_NAME_TXT;
     let backup = "backup";
 
-    #[cfg(target_os = "linux")]
-    let expected_stdout = at.read(FOLLOW_NAME_EXP);
-
-    #[cfg(target_os = "linux")]
+    let expected_stdout = at.read(FOLLOW_NAME_SHORT_EXP);
     let expected_stderr = format!(
-        "{}: {source}: No such file or directory\n{0}: '{source}' has appeared;  following new file\n",
+        "{}: '{source}' has become inaccessible: No such file or directory\n\
+         {0}: no files remaining\n",
         ts.util_name,
     );
-
-    // NOTE: We are less strict if not on Linux (inotify backend).
-
-    #[cfg(not(target_os = "linux"))]
-    let expected_stdout = at.read(FOLLOW_NAME_SHORT_EXP);
-
-    #[cfg(not(target_os = "linux"))]
-    let expected_stderr = format!("{}: {source}: No such file or directory\n", ts.util_name);
 
     let delay = 500;
     let args = ["--follow=name", source];
@@ -2472,12 +2448,12 @@ fn test_follow_name_move_create1() {
     at.copy(backup, source);
     p.delay(delay);
 
-    p.make_assertion().is_alive();
-    p.kill()
-        .make_assertion()
+    p.make_assertion()
+        .is_not_alive()
         .with_all_output()
         .stderr_is(expected_stderr)
-        .stdout_is(expected_stdout);
+        .stdout_is(expected_stdout)
+        .failure();
 }
 
 #[test]
@@ -2573,7 +2549,7 @@ fn test_follow_name_hash_table_stress() {
 fn test_follow_name_move1() {
     // This test triggers a move event while `tail --follow=name file` is running.
     // ((sleep 2 && mv file backup &)>/dev/null 2>&1 &) ; tail --follow=name file
-    // NOTE: For `---disable-inotify` tail exits with "no file remaining", it stays open w/o it.
+    // NOTE: With and without `---disable-inotify` tail exits with "no files remaining".
 
     let ts = TestScenario::new(util_name!());
     let at = &ts.fixtures;
@@ -2582,44 +2558,33 @@ fn test_follow_name_move1() {
     let backup = "backup";
 
     let expected_stdout = at.read(FOLLOW_NAME_SHORT_EXP);
-    let expected_stderr = [
-        format!("{}: {source}: No such file or directory\n", ts.util_name),
-        format!(
-            "{}: {source}: No such file or directory\n{0}: no files remaining\n",
-            ts.util_name,
-        ),
-    ];
-
-    let mut args = vec!["--follow=name", source];
+    let expected_stderr = format!(
+        "{}: '{source}' has become inaccessible: No such file or directory\n\
+         {0}: no files remaining\n",
+        ts.util_name,
+    );
 
     let mut delay = 500;
-    #[allow(clippy::needless_range_loop)]
-    for i in 0..2 {
-        let mut p = ts.ucmd().args(&args).run_no_wait();
+    for polling in [&[][..], &["--use-polling"][..]] {
+        let mut p = ts
+            .ucmd()
+            .args(&["--follow=name", source])
+            .args(polling)
+            .run_no_wait();
 
         p.make_assertion_with_delay(delay).is_alive();
 
         at.rename(source, backup);
         p.delay(delay);
 
-        if i == 0 {
-            p.make_assertion().is_alive();
-            p.kill()
-                .make_assertion()
-                .with_all_output()
-                .stderr_is(&expected_stderr[i])
-                .stdout_is(&expected_stdout);
-        } else {
-            p.make_assertion()
-                .is_not_alive()
-                .with_all_output()
-                .stderr_is(&expected_stderr[i])
-                .stdout_is(&expected_stdout)
-                .failure();
-        }
+        p.make_assertion()
+            .is_not_alive()
+            .with_all_output()
+            .stderr_is(&expected_stderr)
+            .stdout_is(&expected_stdout)
+            .failure();
 
         at.rename(backup, source);
-        args.push("--use-polling");
         delay *= 3;
     }
 }
@@ -2645,7 +2610,7 @@ fn test_follow_name_move2() {
     //
     // ==> file2 <==
     // file2_content
-    // tail: file1: No such file or directory
+    // tail: 'file1' has become inaccessible: No such file or directory
     // tail: 'file2' has been replaced;  following new file
     // file1_content
     // more_file2_content
@@ -2665,7 +2630,7 @@ fn test_follow_name_move2() {
             more_{file2}_content\n\n==> {file1} <==\nmore_{file1}_content\n"
     );
     let mut expected_stderr = format!(
-        "{0}: {1}: No such file or directory\n\
+        "{0}: '{1}' has become inaccessible: No such file or directory\n\
             {0}: '{2}' has been replaced;  following new file\n\
             {0}: '{1}' has appeared;  following new file\n",
         ts.util_name, file1, file2
@@ -2706,7 +2671,7 @@ fn test_follow_name_move2() {
         //  polling does not change.
         expected_stderr = format!(
             "{0}: '{2}' has been replaced;  following new file\n\
-                {0}: {1}: No such file or directory\n\
+                {0}: '{1}' has become inaccessible: No such file or directory\n\
                 {0}: '{1}' has appeared;  following new file\n",
             ts.util_name, file1, file2
         );
