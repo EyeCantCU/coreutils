@@ -3064,3 +3064,18 @@ fn test_du_entry_vanished_after_readdir() {
     assert!(output.stderr.is_empty(), "{output:?}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "0\t.\n");
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_files0_from_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" du --files0-from=-"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("du: -: read error: Bad file descriptor\n");
+}

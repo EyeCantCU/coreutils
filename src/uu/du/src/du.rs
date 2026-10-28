@@ -24,7 +24,7 @@ use std::thread;
 use std::time::SystemTime;
 use uucore::diagnostics::OptionValue;
 use uucore::display::{Quotable, print_verbatim};
-use uucore::error::{FromIo, UError, UResult, USimpleError};
+use uucore::error::{FromIo, UError, UResult, USimpleError, strip_errno};
 use uucore::fs::SYMLINK_FOLLOW_LIMIT;
 use uucore::fsext::{MetadataTimeField, metadata_get_time};
 use uucore::line_ending::LineEnding;
@@ -970,7 +970,14 @@ enum FilesFromError {
 fn read_files_from(
     file_name: &OsStr,
 ) -> io::Result<impl Iterator<Item = Result<PathBuf, FilesFromError>> + use<>> {
+    let read_error = |name: &OsStr, e: io::Error| {
+        io::Error::other(
+            translate!("du-error-read-error", "file" => name.maybe_quote(), "error" => strip_errno(&e)),
+        )
+    };
     let reader: Box<dyn BufRead> = if file_name == "-" {
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        uucore::signals::ensure_stdin_open().map_err(|e| read_error(file_name, e))?;
         // Read from standard input
         Box::new(BufReader::new(io::stdin()))
     } else {
@@ -999,7 +1006,7 @@ fn read_files_from(
         .split(b'\0')
         .enumerate()
         .map(move |(i, line)| {
-            let path = line.map_err(FilesFromError::Read)?;
+            let path = line.map_err(|e| FilesFromError::Read(read_error(&file_name, e)))?;
             if path.is_empty() {
                 let line_number = i + 1;
                 Err(FilesFromError::Invalid(USimpleError::new(
