@@ -17,7 +17,7 @@ use simd::process_input;
 use std::ffi::OsString;
 use std::io::{stdin, stdout};
 use uucore::display::Quotable;
-use uucore::error::{UResult, USimpleError, UUsageError};
+use uucore::error::{FromIo, UResult, USimpleError, UUsageError};
 use uucore::fs::is_stdin_directory;
 use uucore::translate;
 use uucore::{format_usage, os_str_as_bytes, show};
@@ -121,7 +121,11 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         }
     };
 
-    if is_stdin_directory(&stdin) {
+    #[cfg(all(unix, not(target_os = "fuchsia")))]
+    uucore::signals::ensure_stdin_open().map_err_context(|| translate!("tr-error-read-error"))?;
+    // Reading a directory fails with EISDIR on Linux, so let the read report
+    // it (or any other read error) there.
+    if cfg!(not(any(target_os = "linux", target_os = "android"))) && is_stdin_directory(&stdin) {
         return Err(USimpleError::new(1, translate!("tr-error-read-directory")));
     }
 
