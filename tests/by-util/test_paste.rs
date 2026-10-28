@@ -8,6 +8,8 @@
 use std::os::unix::ffi::OsStringExt;
 use uutests::at_and_ucmd;
 use uutests::new_ucmd;
+use uutests::util::TestScenario;
+use uutests::util_name;
 
 struct TestData<'b> {
     name: &'b str,
@@ -532,4 +534,40 @@ fn test_repeated_delimiter_takes_the_last() {
         .pipe_in("a\nb\n")
         .succeeds()
         .stdout_is("a:b\n");
+}
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" paste -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("paste: -: Bad file descriptor\n");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_read_error_ends_only_that_input() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.mkdir("dir");
+    at.write("file", "a\nb\n");
+    ucmd.args(&["dir", "file", "dir"])
+        .fails_with_code(1)
+        .stdout_is("\ta\t\n\tb\t\n")
+        .stderr_is("paste: dir: Is a directory\npaste: dir: Is a directory\n");
+}
+
+#[test]
+fn test_missing_file_is_named() {
+    new_ucmd!()
+        .arg("missing")
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_contains("paste: missing: ");
 }

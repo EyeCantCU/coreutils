@@ -5,18 +5,19 @@
 
 use clap::{Arg, ArgAction, Command};
 use std::cell::{OnceCell, RefCell};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Stdin, Write, stdin, stdout};
+use std::io::{self, BufRead, BufReader, Read, Stdin, StdinLock, Write, stdin, stdout};
 use std::iter::Cycle;
 use std::path::Path;
 use std::rc::Rc;
 use std::slice::Iter;
-use uucore::error::{UResult, USimpleError};
-use uucore::format_usage;
+use uucore::display::Quotable;
+use uucore::error::{FromIo, UResult, USimpleError, set_exit_code, strip_errno};
 use uucore::i18n::charmap::mb_char_len;
 use uucore::line_ending::LineEnding;
 use uucore::translate;
+use uucore::{format_usage, show_error};
 
 mod options {
     pub const DELIMITER: &str = "delimiters";
@@ -107,8 +108,8 @@ fn paste(
             )
         } else {
             let path = Path::new(&filename);
-            let file = File::open(path)?;
-            InputSource::File(BufReader::new(file))
+            let file = File::open(path).map_err_context(|| filename.maybe_quote().to_string())?;
+            InputSource::File(BufReader::new(file), filename)
         };
 
         input_source_vec.push(input_source);
@@ -141,7 +142,7 @@ fn paste(
         for input_source in &mut input_source_vec {
             output.clear();
 
-            while input_source.read_until(line_ending_byte, &mut output)? > 0 {
+            while input_source.read_until(line_ending_byte, &mut output) > 0 {
                 remove_trailing_line_ending_byte(line_ending_byte, &mut output);
                 delimiter_state.write_delimiter(&mut output);
             }
@@ -168,7 +169,7 @@ fn paste(
                 if eof[i] {
                     eof_count += 1;
                 } else {
-                    match input_source.read_until(line_ending_byte, &mut output)? {
+                    match input_source.read_until(line_ending_byte, &mut output) {
                         0 => {
                             eof[i] = true;
                             eof_count += 1;
@@ -212,7 +213,7 @@ fn write_single_input_source(
     let mut has_data = false;
     let mut last_byte = line_ending_byte;
 
-    while let bytes_read @ 1.. = input_source.read(&mut buffer)? {
+    while let bytes_read @ 1.. = input_source.read(&mut buffer) {
         has_data = true;
         last_byte = buffer[bytes_read - 1];
 
@@ -370,38 +371,48 @@ impl<'a> DelimiterState<'a> {
 }
 
 enum InputSource {
-    File(BufReader<File>),
+    File(BufReader<File>, OsString),
     StandardInput(Rc<RefCell<Stdin>>),
 }
 
 impl InputSource {
-    fn read(&mut self, buf: &mut [u8]) -> UResult<usize> {
-        let us = match self {
-            Self::File(bu) => bu.read(buf)?,
-            Self::StandardInput(rc) => rc
-                .try_borrow()
-                .map_err(|bo| {
-                    USimpleError::new(1, translate!("paste-error-stdin-borrow", "error" => bo))
-                })?
-                .lock()
-                .read(buf)?,
+    fn read(&mut self, buf: &mut [u8]) -> usize {
+        let result = match self {
+            Self::File(bu, _) => bu.read(buf),
+            Self::StandardInput(rc) => Self::lock_stdin(rc).and_then(|mut s| s.read(buf)),
         };
-
-        Ok(us)
+        self.end_on_error(result)
     }
 
-    fn read_until(&mut self, byte: u8, buf: &mut Vec<u8>) -> UResult<usize> {
-        let us = match self {
-            Self::File(bu) => bu.read_until(byte, buf)?,
-            Self::StandardInput(rc) => rc
-                .try_borrow()
-                .map_err(|bo| {
-                    USimpleError::new(1, translate!("paste-error-stdin-borrow", "error" => bo))
-                })?
-                .lock()
-                .read_until(byte, buf)?,
+    fn read_until(&mut self, byte: u8, buf: &mut Vec<u8>) -> usize {
+        let result = match self {
+            Self::File(bu, _) => bu.read_until(byte, buf),
+            Self::StandardInput(rc) => {
+                Self::lock_stdin(rc).and_then(|mut s| s.read_until(byte, buf))
+            }
         };
+        self.end_on_error(result)
+    }
 
-        Ok(us)
+    fn lock_stdin(rc: &RefCell<Stdin>) -> io::Result<StdinLock<'static>> {
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        uucore::signals::ensure_stdin_open()?;
+        let stdin = rc.try_borrow().map_err(|bo| {
+            io::Error::other(translate!("paste-error-stdin-borrow", "error" => bo))
+        })?;
+        Ok(stdin.lock())
+    }
+
+    /// Reports a read error on this input, which then counts as exhausted.
+    fn end_on_error(&self, result: io::Result<usize>) -> usize {
+        result.unwrap_or_else(|e| {
+            let name = match self {
+                Self::File(_, name) => name.as_os_str(),
+                Self::StandardInput(_) => OsStr::new("-"),
+            };
+            show_error!("{}: {}", name.maybe_quote(), strip_errno(&e));
+            set_exit_code(1);
+            0
+        })
     }
 }
