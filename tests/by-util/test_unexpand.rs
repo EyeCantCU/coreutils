@@ -508,3 +508,21 @@ fn test_backspaces_before_last_tab_stop_resume_conversion() {
         .succeeds()
         .stdout_is("abcde\x08\x08\tX\n");
 }
+
+#[test]
+#[cfg(unix)]
+fn test_stdbuf_line_buffered_stdout() {
+    // With `stdbuf -oL`, each line must be written while the input is still open.
+    let mut child = new_ucmd!()
+        .args(&["-a"])
+        .env("_STDBUF_O", "L")
+        .set_stdin(std::process::Stdio::piped())
+        .run_no_wait();
+    child.write_in("a       b\n");
+    child.delay(500);
+    child
+        .kill()
+        .make_assertion()
+        .with_current_output()
+        .stdout_only("a\tb\n");
+}

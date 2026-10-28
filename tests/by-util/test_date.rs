@@ -4156,3 +4156,22 @@ fn test_invalid_date_escaping_depends_on_locale() {
             .stderr_is(expected);
     }
 }
+
+#[test]
+#[cfg(unix)]
+fn test_stdbuf_line_buffered_stdout() {
+    // With `stdbuf -oL`, each line must be written while the input is still open.
+    let mut child = new_ucmd!()
+        .args(&["-f", "-", "+%F"])
+        .env("_STDBUF_O", "L")
+        .env("TZ", "UTC")
+        .set_stdin(std::process::Stdio::piped())
+        .run_no_wait();
+    child.write_in("2020-01-01\n");
+    child.delay(500);
+    child
+        .kill()
+        .make_assertion()
+        .with_current_output()
+        .stdout_only("2020-01-01\n");
+}

@@ -2145,3 +2145,21 @@ fn test_repeated_field_is_an_error() {
         .fails_with_code(1)
         .stderr_only("numfmt: multiple field specifications\n");
 }
+
+#[test]
+#[cfg(unix)]
+fn test_stdbuf_line_buffered_stdout() {
+    // With `stdbuf -oL`, each line must be written while the input is still open.
+    let mut child = new_ucmd!()
+        .args(&["--to=si"])
+        .env("_STDBUF_O", "L")
+        .set_stdin(std::process::Stdio::piped())
+        .run_no_wait();
+    child.write_in("1000\n");
+    child.delay(500);
+    child
+        .kill()
+        .make_assertion()
+        .with_current_output()
+        .stdout_only("1.0k\n");
+}
