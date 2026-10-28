@@ -378,6 +378,10 @@ impl<'a> Input<'a> {
         };
         #[cfg(all(not(unix), not(windows)))]
         let mut src = Source::Stdin(io::stdin());
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        uucore::signals::ensure_stdin_open().map_err_context(
+            || translate!("dd-error-reading", "file" => translate!("dd-standard-input")),
+        )?;
         #[cfg(unix)]
         let mut src = Source::stdin_as_file();
         #[cfg(unix)]
