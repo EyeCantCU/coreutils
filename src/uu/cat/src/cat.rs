@@ -361,6 +361,9 @@ fn cat_handle<R: FdReadable>(
 fn cat_path(path: &OsString, options: &OutputOptions, state: &mut OutputState) -> CatResult<()> {
     match get_input_type(path)? {
         InputType::StdIn => {
+            // A closed stdin is reopened as /dev/null before `uumain` runs, so
+            // reading it would succeed silently instead of failing with EBADF.
+            uucore::signals::ensure_stdin_open()?;
             let stdin = io::stdin();
             let is_interactive = stdin.is_terminal();
             if !is_safe_overwrite(&stdin, &io::stdout()) {
@@ -372,7 +375,11 @@ fn cat_path(path: &OsString, options: &OutputOptions, state: &mut OutputState) -
             };
             cat_handle(&mut handle, options, state)
         }
-        InputType::Directory => Err(CatError::IsDirectory),
+        // Reading a directory fails with EISDIR on Linux, so let the read
+        // report it (or any other read error) there.
+        InputType::Directory if cfg!(not(any(target_os = "linux", target_os = "android"))) => {
+            Err(CatError::IsDirectory)
+        }
         #[cfg(unix)]
         InputType::Socket => Err(CatError::NoSuchDeviceOrAddress),
         _ => {

@@ -957,3 +957,28 @@ fn test_cat_eintr_handling() {
     // Verify that the interruption was encountered and handled
     assert_eq!(*interrupt_count.lock().unwrap(), 1);
 }
+
+#[test]
+#[cfg(all(target_os = "linux", not(wasi_runner)))]
+fn test_read_error() {
+    new_ucmd!()
+        .arg("/proc/self/mem")
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("cat: /proc/self/mem: Input/output error\n");
+}
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" cat -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_contains("cat: -: Bad file descriptor");
+}
