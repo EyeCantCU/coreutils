@@ -42,8 +42,8 @@ use clap::ArgAction;
 use clap::{Arg, ArgMatches, Command, parser::ValueSource};
 use std::ffi::OsString;
 use uucore::diagnostics::OptionValue;
-use uucore::display::Quotable;
 use uucore::error::{UResult, USimpleError};
+use uucore::quoting_style::{Quotes, QuotingStyle, locale_aware_escape_name};
 use uucore::translate;
 
 use uucore::parser::parse_size::ParseSizeError;
@@ -79,6 +79,29 @@ struct OdOptions {
     string_min_length: Option<usize>,
 }
 
+/// Quotes `s` C-style in single quotes, as used for invalid values in errors.
+fn locale_aware_c_single_escape(s: &str) -> String {
+    let style = QuotingStyle::C {
+        quotes: Quotes::Single,
+    };
+    locale_aware_escape_name(s.as_ref(), style)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Largest value accepted for the byte counts and widths given on the command
+/// line; anything above is reported as too large.
+const MAX_BYTES_ARG: u64 = i64::MAX as u64;
+
+/// Rejects `n` (parsed from `s`) as too large when it exceeds `max`.
+fn at_most(n: u64, max: u64, s: &str) -> Result<u64, ParseSizeError> {
+    if n > max {
+        Err(ParseSizeError::SizeTooBig(s.to_string()))
+    } else {
+        Ok(n)
+    }
+}
+
 /// Helper function to parse bytes with error handling
 fn parse_bytes_option(
     matches: &ArgMatches,
@@ -86,10 +109,11 @@ fn parse_bytes_option(
     diag_args: Option<&[OsString]>,
     option_name: &'static str,
     short: Option<char>,
+    max: u64,
 ) -> UResult<Option<u64>> {
     match matches.get_one::<String>(option_name) {
         None => Ok(None),
-        Some(s) => match parse_number_of_bytes(s) {
+        Some(s) => match parse_number_of_bytes(s).and_then(|n| at_most(n, max, s)) {
             Ok(n) => Ok(Some(n)),
             Err(e) => {
                 let message =
@@ -124,9 +148,15 @@ impl OdOptions {
             ByteOrder::Native
         };
 
-        let mut skip_bytes =
-            parse_bytes_option(matches, args, diag_args, options::SKIP_BYTES, Some('j'))?
-                .unwrap_or(0);
+        let mut skip_bytes = parse_bytes_option(
+            matches,
+            args,
+            diag_args,
+            options::SKIP_BYTES,
+            Some('j'),
+            MAX_BYTES_ARG,
+        )?
+        .unwrap_or(0);
 
         let mut label: Option<u64> = None;
 
@@ -147,23 +177,25 @@ impl OdOptions {
             matches.value_source(options::WIDTH),
         ) {
             let width_display = option_display_name(args, options::WIDTH, Some('w'));
-            let parsed = parse_number_of_bytes(s).map_err(|e| {
-                let message = format_error_message(&e, s, &width_display);
-                e.size_value_error(
-                    diag_args,
-                    &OptionValue::new(s, 'w', options::WIDTH),
-                    0,
-                    &message,
-                    USimpleError::new(1, message.clone()),
-                )
-            })?;
+            let parsed = parse_number_of_bytes(s)
+                .and_then(|n| at_most(n, MAX_BYTES_ARG, s))
+                .map_err(|e| {
+                    let message = format_error_message(&e, s, &width_display);
+                    e.size_value_error(
+                        diag_args,
+                        &OptionValue::new(s, 'w', options::WIDTH),
+                        0,
+                        &message,
+                        USimpleError::new(1, message.clone()),
+                    )
+                })?;
             if parsed == 0 {
                 return Err(USimpleError::new(
                     1,
                     translate!(
                         "od-error-invalid-argument",
                         "option" => width_display,
-                        "value" => s.quote()
+                        "value" => locale_aware_c_single_escape(s)
                     ),
                 ));
             }
@@ -173,7 +205,7 @@ impl OdOptions {
                     translate!(
                         "od-error-argument-too-large",
                         "option" => width_display.clone(),
-                        "value" => s.quote()
+                        "value" => locale_aware_c_single_escape(s)
                     ),
                 )
             })?
@@ -194,10 +226,23 @@ impl OdOptions {
 
         let output_duplicates = matches.get_flag(options::OUTPUT_DUPLICATES);
 
-        let read_bytes =
-            parse_bytes_option(matches, args, diag_args, options::READ_BYTES, Some('N'))?;
+        let read_bytes = parse_bytes_option(
+            matches,
+            args,
+            diag_args,
+            options::READ_BYTES,
+            Some('N'),
+            MAX_BYTES_ARG,
+        )?;
 
-        let strings = parse_bytes_option(matches, args, diag_args, options::STRINGS, Some('S'))?;
+        let strings = parse_bytes_option(
+            matches,
+            args,
+            diag_args,
+            options::STRINGS,
+            Some('S'),
+            MAX_BYTES_ARG - 1,
+        )?;
         let string_min_length = match strings {
             None => None,
             Some(n) => Some(usize::try_from(n).map_err(|_| {
@@ -830,13 +875,13 @@ fn format_error_message(error: &ParseSizeError, s: &str, option: &str) -> String
     // GNU's od echos affected flag, -N or --read-bytes (-j or --skip-bytes, etc.), depending user's selection
     match error {
         ParseSizeError::InvalidSuffix(_) => {
-            translate!("od-error-invalid-suffix", "option" => option, "value" => s.quote())
+            translate!("od-error-invalid-suffix", "option" => option, "value" => locale_aware_c_single_escape(s))
         }
         ParseSizeError::ParseFailure(_) | ParseSizeError::PhysicalMem(_) => {
-            translate!("od-error-invalid-argument", "option" => option, "value" => s.quote())
+            translate!("od-error-invalid-argument", "option" => option, "value" => locale_aware_c_single_escape(s))
         }
         ParseSizeError::SizeTooBig(_) => {
-            translate!("od-error-argument-too-large", "option" => option, "value" => s.quote())
+            translate!("od-error-argument-too-large", "option" => option, "value" => locale_aware_c_single_escape(s))
         }
     }
 }
