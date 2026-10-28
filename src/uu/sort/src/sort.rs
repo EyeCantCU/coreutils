@@ -163,8 +163,20 @@ pub enum SortError {
     #[error("{}", translate!("sort-compress-prog-execution-failed", "prog" => .prog, "error" => strip_errno(.error)))]
     CompressProgExecutionFailed { prog: String, error: std::io::Error },
 
-    #[error("{}", translate!("sort-compress-prog-terminated-abnormally", "prog" => .prog.quote()))]
-    CompressProgTerminatedAbnormally { prog: String },
+    #[error("{}", translate!("sort-compress-prog-terminated-abnormally", "prog" => format!("{}{}", .prog.quote(), if *.decompress { " [-d]" } else { "" })))]
+    CompressProgTerminatedAbnormally { prog: String, decompress: bool },
+
+    #[error("{}", translate_text!("sort-close-failed", "path" => format!("{}", .path.maybe_quote()), "error" => strip_errno(.error)))]
+    CloseFailed {
+        path: PathBuf,
+        error: std::io::Error,
+    },
+
+    #[error("{}: {}", translate_text!("sort-error-write-failed", "output" => .path.maybe_quote()), strip_errno(.error))]
+    TmpWriteFailed {
+        path: PathBuf,
+        error: std::io::Error,
+    },
 
     #[error("{}", translate_text!("sort-cannot-create-tmp-file", "path" => format!("{}", .path.quote())))]
     TmpFileCreationFailed { path: PathBuf },
@@ -240,6 +252,35 @@ pub struct Output {
     file: Option<(OsString, File)>,
 }
 
+/// Standard output, re-raising SIGPIPE on `EPIPE` while it is ignored for a compression
+/// program, unless SIGPIPE was already ignored when sort started.
+struct StdoutWriter(std::io::Stdout);
+
+impl StdoutWriter {
+    fn check<T>(result: std::io::Result<T>) -> std::io::Result<T> {
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        if let Err(e) = &result
+            && e.kind() == std::io::ErrorKind::BrokenPipe
+            && !uucore::signals::sigpipe_was_ignored()
+        {
+            let _ = uucore::signals::enable_pipe_errors();
+            // SAFETY: raising a signal has no memory-safety requirements.
+            unsafe { libc::raise(libc::SIGPIPE) };
+        }
+        result
+    }
+}
+
+impl Write for StdoutWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Self::check(self.0.write(buf))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Self::check(self.0.flush())
+    }
+}
+
 impl Output {
     fn new(name: Option<impl AsRef<OsStr>>) -> UResult<Self> {
         let file = if let Some(name) = name {
@@ -274,7 +315,7 @@ impl Output {
                 }
                 Box::new(file)
             }
-            None => Box::new(stdout()),
+            None => Box::new(StdoutWriter(stdout())),
         }))
     }
 
@@ -2272,6 +2313,13 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     settings.compress_prog = matches
         .get_one::<String>(options::COMPRESS_PROG)
         .map(String::from);
+
+    // A compression program may exit before reading everything sort writes to
+    // it. Get an EPIPE error for that instead of being killed by SIGPIPE.
+    #[cfg(all(unix, not(target_os = "fuchsia")))]
+    if settings.compress_prog.is_some() {
+        let _ = uucore::signals::disable_pipe_errors();
+    }
 
     if let Some(n_merge) = matches.get_one::<String>(options::BATCH_SIZE) {
         // `None` means the value does not even fit in a `usize`, which is always too large.

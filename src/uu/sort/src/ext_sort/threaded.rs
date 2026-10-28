@@ -23,7 +23,7 @@ use crate::merge::WriteablePlainTmpFile;
 use crate::merge::WriteableTmpFile;
 use crate::tmp_dir::{TmpDirWrapper, TmpPath};
 use crate::{
-    GlobalSettings, Line,
+    GlobalSettings, Line, SortError,
     chunks::{self, Chunk},
     compare_by, merge, print_sorted, sort_by,
 };
@@ -294,7 +294,12 @@ fn write<I: WriteableTmpFile>(
     separator: u8,
 ) -> UResult<I::Closed> {
     let mut tmp_file = I::create(file, compress_prog)?;
-    write_lines(chunk.lines(), tmp_file.as_write(), separator)?;
+    write_lines(chunk.lines(), tmp_file.as_write(), separator).map_err(|error| {
+        SortError::TmpWriteFailed {
+            path: tmp_file.path().to_owned(),
+            error,
+        }
+    })?;
     tmp_file.finished_writing()
 }
 
