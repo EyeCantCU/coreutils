@@ -3297,3 +3297,23 @@ fn test_write_error() {
         .fails_with_code(1)
         .stderr_is("date: write error: No space left on device\n");
 }
+
+#[test]
+#[cfg(unix)]
+fn test_stdbuf_line_buffered_stdout() {
+    // `stdbuf -oL` requests line buffered stdout through `_STDBUF_O`: output
+    // must then be written line by line while the input is still open.
+    let mut child = new_ucmd!()
+        .args(&["-f", "-", "+%F"])
+        .env("_STDBUF_O", "L")
+        .env("TZ", "UTC")
+        .set_stdin(std::process::Stdio::piped())
+        .run_no_wait();
+    child.write_in("2020-01-01\n");
+    child.delay(500);
+    child
+        .kill()
+        .make_assertion()
+        .with_current_output()
+        .stdout_only("2020-01-01\n");
+}

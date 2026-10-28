@@ -17,7 +17,7 @@ use parse_datetime::{ExtendedDateTime, ParsedDateTime};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Read, Write, stderr};
+use std::io::{BufRead, BufReader, Read, Write, stderr};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use thiserror::Error;
@@ -626,7 +626,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     };
 
     let format_string = make_format_string(&settings);
-    let mut stdout = BufWriter::new(std::io::stdout().lock());
+    let mut stdout = uucore::stdbuf::stdout_buf_writer(std::io::stdout().lock());
 
     // Format all the dates
     let config = Config::new().custom(PosixCustom::new()).lenient(true);

@@ -463,7 +463,7 @@ fn expand_file(
 }
 
 fn expand(options: &Options) -> UResult<()> {
-    let mut output = BufWriter::new(stdout());
+    let mut output = uucore::stdbuf::stdout_buf_writer(stdout());
 
     for file in &options.files {
         if let Err(e) = expand_file(file, &mut output, options) {

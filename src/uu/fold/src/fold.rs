@@ -7,7 +7,7 @@
 
 use clap::{Arg, ArgAction, Command};
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Read, Write, stdin, stdout};
+use std::io::{BufRead, BufReader, Read, Write, stdin, stdout};
 use std::num::IntErrorKind;
 use std::path::Path;
 use unicode_width::UnicodeWidthChar;
@@ -162,7 +162,7 @@ fn fold(
     spaces: bool,
     width: usize,
 ) -> UResult<()> {
-    let mut output = BufWriter::new(stdout());
+    let mut output = uucore::stdbuf::stdout_buf_writer(stdout());
 
     for filename in filenames {
         let filename: &str = filename;

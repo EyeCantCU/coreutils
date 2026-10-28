@@ -33,6 +33,7 @@ pub use crate::mods::locale;
 pub use crate::mods::os;
 pub use crate::mods::panic;
 pub use crate::mods::posix;
+pub use crate::mods::stdbuf;
 
 // * feature-gated modules
 #[cfg(feature = "backup-control")]

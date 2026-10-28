@@ -1239,3 +1239,21 @@ fn test_nonexistent_input_file_error_matches_gnu() {
         .fails_with_code(1)
         .stderr_only("uniq: nosuchfile.txt: No such file or directory\n");
 }
+
+#[test]
+#[cfg(unix)]
+fn test_stdbuf_line_buffered_stdout() {
+    // `stdbuf -oL` requests line buffered stdout through `_STDBUF_O`: output
+    // must then be written line by line while the input is still open.
+    let mut child = new_ucmd!()
+        .env("_STDBUF_O", "L")
+        .set_stdin(std::process::Stdio::piped())
+        .run_no_wait();
+    child.write_in("a\nb\n");
+    child.delay(500);
+    child
+        .kill()
+        .make_assertion()
+        .with_current_output()
+        .stdout_only("a\n");
+}

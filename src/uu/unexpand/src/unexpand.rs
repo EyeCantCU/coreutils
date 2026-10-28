@@ -672,7 +672,7 @@ fn unexpand_file(
 
 fn unexpand(options: &Options) -> UResult<()> {
     let mut buf = [0u8; 128];
-    let mut output = BufWriter::new(stdout());
+    let mut output = uucore::stdbuf::stdout_buf_writer(stdout());
     let tab_config = &options.tab_config;
     let lastcol = if tab_config.tabstops.len() > 1
         && tab_config.increment_size.is_none()
