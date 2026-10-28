@@ -453,6 +453,9 @@ impl Observer {
                                 "{}",
                                 translate!("tail-status-backend-cannot-be-used-reverting-to-polling", "backend" => text::BACKEND)
                             );
+                            if settings.debug {
+                                show_error!("{}", translate!("tail-debug-using-polling-mode"));
+                            }
                             self.orphans.push(event_path.clone());
                             let _ = self.watcher_rx.as_mut().unwrap().unwatch(event_path);
                         } else if event_path.is_symlink() && !self.orphans.contains(event_path) {
