@@ -124,3 +124,16 @@ fn test_non_utf8() {
         &b"\xbf\xff\xee bar\n".repeat(5000),
     );
 }
+
+/// Endless output to a standard output that was closed at startup is stopped.
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdout() {
+    let scene = uutests::util::TestScenario::new(uutests::util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec >&-; \"$0\" yes"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stderr_contains("Bad file descriptor");
+}
