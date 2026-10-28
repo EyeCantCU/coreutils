@@ -3993,3 +3993,25 @@ fn test_check_improperly_formatted_line_does_not_select_format() {
         .stdout_is("a: OK\n")
         .stderr_contains("1 line is improperly formatted");
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" cksum -a md5 -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("cksum: -: Bad file descriptor\n");
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" cksum -c -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("cksum: 'standard input': Bad file descriptor\n");
+}

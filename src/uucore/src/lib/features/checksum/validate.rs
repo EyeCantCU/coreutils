@@ -598,9 +598,12 @@ fn get_file_to_check(
         };
         match File::open(filename) {
             Ok(f) => {
-                if f.metadata()
-                    .map_err(|_| LineCheckError::CantOpenFile)?
-                    .is_dir()
+                // Reading a directory fails with EISDIR on Linux, so let the
+                // read report it (or any other read error) there.
+                if cfg!(not(any(target_os = "linux", target_os = "android")))
+                    && f.metadata()
+                        .map_err(|_| LineCheckError::CantOpenFile)?
+                        .is_dir()
                 {
                     print_error(io::Error::new(
                         io::ErrorKind::IsADirectory,
@@ -908,6 +911,11 @@ fn process_checksum_file(
     let input_is_stdin = filename_input == OsStr::new("-");
 
     let file: Box<dyn Read> = if input_is_stdin {
+        #[cfg(all(feature = "signals", unix, not(target_os = "fuchsia")))]
+        if let Err(e) = crate::signals::ensure_stdin_open() {
+            show!(e.map_err_context(|| "standard input".quote().to_string()));
+            return Err(FileCheckError::CantOpenChecksumFile);
+        }
         // Use stdin if "-" is specified
         Box::new(stdin())
     } else {
