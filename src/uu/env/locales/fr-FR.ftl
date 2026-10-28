@@ -15,6 +15,7 @@ env-help-ignore-signal = définir la gestion du/des signal/signaux SIG pour ne r
 env-help-default-signal = réinitialiser la gestion du/des signal/signaux SIG à l'action par défaut
 env-help-block-signal = bloquer la livraison du/des signal/signaux SIG pendant l'exécution de COMMAND
 env-help-list-signal-handling = lister les traitements de signaux modifiés par les options précédentes
+env-help-env0-from = lire les entrées d'environnement terminées par NUL depuis FICHIER ('-' pour l'entrée standard)
 
 # Messages d'erreur
 env-error-missing-closing-quote = aucune guillemet de fermeture dans la chaîne -S à la position { $position } pour la guillemet '{ $quote }'
@@ -37,6 +38,9 @@ env-error-must-specify-command-with-chdir = doit spécifier une commande avec --
 env-error-cannot-change-directory = impossible de changer de répertoire vers { $directory } : { $error }
 env-error-argv0-not-supported = --argv0 n'est actuellement pas pris en charge sur cette plateforme
 env-error-failed-set-signal-action = échec de la définition de l'action du signal pour le signal { $signal } : { $error }
+env-error-env0-from-read = impossible de lire { $file } : { $error }
+env-error-env0-from-unterminated = { $file } : la dernière entrée n'est pas terminée par un octet NUL
+env-error-env0-from-invalid = entrée d'environnement invalide { $entry }
 
 # Messages d'avertissement
 env-warning-no-name-specified = aucun nom spécifié pour la valeur { $value }

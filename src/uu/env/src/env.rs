@@ -34,15 +34,18 @@ use std::env;
 #[cfg(unix)]
 use std::ffi::CString;
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::io;
-use std::io::Write as _;
 use std::io::stderr;
+use std::io::{Read as _, Write as _};
 #[cfg(all(unix, not(target_os = "fuchsia")))]
 use std::mem::zeroed;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 
-use uucore::display::{Quotable, print_all_env_vars};
+use uucore::display::Quotable;
+#[cfg(not(unix))]
+use uucore::display::print_all_env_vars;
 use uucore::error::{ExitCode, UError, UResult, USimpleError, UUsageError, strip_errno};
 use uucore::line_ending::LineEnding;
 #[cfg(all(unix, not(target_os = "fuchsia")))]
@@ -100,6 +103,7 @@ mod options {
     pub const DEFAULT_SIGNAL: &str = "default-signal";
     pub const BLOCK_SIGNAL: &str = "block-signal";
     pub const LIST_SIGNAL_HANDLING: &str = "list-signal-handling";
+    pub const ENV0_FROM: &str = "env0-from";
 }
 
 struct Options<'a> {
@@ -107,6 +111,7 @@ struct Options<'a> {
     line_ending: LineEnding,
     running_directory: Option<&'a OsStr>,
     files: Vec<&'a OsStr>,
+    env0_from: Vec<&'a OsStr>,
     unsets: Vec<&'a OsStr>,
     sets: Vec<(Cow<'a, OsStr>, Cow<'a, OsStr>)>,
     program: Vec<&'a OsStr>,
@@ -356,6 +361,15 @@ pub fn uu_app() -> Command {
                 .long(options::IGNORE_ENVIRONMENT)
                 .help(translate!("env-help-ignore-environment"))
                 .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new(options::ENV0_FROM)
+                .long(options::ENV0_FROM)
+                .value_name("FILE")
+                .action(ArgAction::Append)
+                .value_parser(ValueParser::os_string())
+                .value_hint(clap::ValueHint::FilePath)
+                .help(translate!("env-help-env0-from")),
         )
         .arg(
             Arg::new(options::CHDIR)
@@ -621,6 +635,7 @@ impl EnvAppData {
             options::CHDIR,
             options::FILE,
             options::UNSET,
+            options::ENV0_FROM,
         ];
         let short_flags_with_args = ['a', 'C', 'f', 'u'];
         let mut consumed_split_payload_arg: Option<usize> = None;
@@ -835,6 +850,8 @@ impl EnvAppData {
         // load .env-style config file prior to those given on the command-line
         load_config_file(&mut opts)?;
 
+        apply_env0_from(&opts)?;
+
         apply_unset_env_vars(&opts)?;
 
         apply_specified_env_vars(&opts);
@@ -868,6 +885,9 @@ impl EnvAppData {
         apply_change_directory(&opts)?;
         if opts.program.is_empty() {
             // no program provided, so just dump all env vars to stdout
+            #[cfg(unix)]
+            raw_environ::print(opts.line_ending)?;
+            #[cfg(not(unix))]
             print_all_env_vars(opts.line_ending)?;
         } else {
             return self.run_program(&opts, self.do_debug_printing);
@@ -1015,6 +1035,10 @@ fn make_options<'a>(
         Some(v) => v.map(OsString::as_os_str).collect(),
         None => Vec::new(),
     };
+    let env0_from = match matches.get_many::<OsString>(options::ENV0_FROM) {
+        Some(v) => v.map(OsString::as_os_str).collect(),
+        None => Vec::new(),
+    };
     let unsets = match matches.get_many::<OsString>("unset") {
         Some(v) => v.map(OsString::as_os_str).collect(),
         None => Vec::new(),
@@ -1037,6 +1061,7 @@ fn make_options<'a>(
         line_ending,
         running_directory,
         files,
+        env0_from,
         unsets,
         sets: vec![],
         program: vec![],
@@ -1073,6 +1098,149 @@ fn make_options<'a>(
     }
 
     Ok(opts)
+}
+
+/// Read the NUL-terminated entries of an `--env0-from` file (`-` is stdin).
+fn read_env0_entries(file: &OsStr) -> UResult<Vec<Vec<u8>>> {
+    let data = if file == "-" {
+        let mut data = Vec::new();
+        io::stdin().lock().read_to_end(&mut data).map(|_| data)
+    } else {
+        fs::read(file)
+    }
+    .map_err(|e| {
+        USimpleError::new(
+            125,
+            translate!("env-error-env0-from-read", "file" => file.quote(), "error" => strip_errno(&e)),
+        )
+    })?;
+    let Some((&last, body)) = data.split_last() else {
+        return Ok(Vec::new());
+    };
+    if last != 0 {
+        return Err(USimpleError::new(
+            125,
+            translate!("env-error-env0-from-unterminated", "file" => file.quote()),
+        ));
+    }
+    Ok(body.split(|&b| b == 0).map(<[u8]>::to_vec).collect())
+}
+
+/// Load the environment entries named by `--env0-from`.
+///
+/// With `--ignore-environment` the entries become the environment as is.
+/// Otherwise a `NAME=VALUE` entry replaces the first entry for `NAME` (or is
+/// appended), and an entry without `=` is appended.
+#[cfg(unix)]
+fn apply_env0_from(opts: &Options<'_>) -> UResult<()> {
+    if opts.env0_from.is_empty() {
+        return Ok(());
+    }
+    let mut environment = if opts.ignore_env {
+        Vec::new()
+    } else {
+        raw_environ::entries()
+    };
+    for file in &opts.env0_from {
+        for entry in read_env0_entries(file)? {
+            let slot = if opts.ignore_env {
+                None
+            } else {
+                entry.iter().position(|&b| b == b'=').and_then(|eq| {
+                    let prefix = &entry[..=eq];
+                    environment.iter_mut().find(|e| e.starts_with(prefix))
+                })
+            };
+            match slot {
+                Some(slot) => *slot = entry,
+                None => environment.push(entry),
+            }
+        }
+    }
+    raw_environ::install(environment);
+    Ok(())
+}
+
+/// Load the environment entries named by `--env0-from`. Only `NAME=VALUE`
+/// entries can be represented here.
+#[cfg(not(unix))]
+fn apply_env0_from(opts: &Options<'_>) -> UResult<()> {
+    for file in &opts.env0_from {
+        for entry in read_env0_entries(file)? {
+            let entry = String::from_utf8_lossy(&entry).into_owned();
+            match entry.split_once('=') {
+                Some((name, value)) if !name.is_empty() => unsafe { env::set_var(name, value) },
+                _ => {
+                    return Err(USimpleError::new(
+                        125,
+                        translate!("env-error-env0-from-invalid", "entry" => entry.quote()),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Direct access to the process environment, which may hold entries that
+/// [`std::env`] cannot represent: duplicates, empty entries, and entries
+/// without `=` or with an empty name.
+#[cfg(unix)]
+mod raw_environ {
+    use std::ffi::{CStr, CString, c_char};
+    use std::io::{self, Write};
+    use uucore::line_ending::LineEnding;
+
+    unsafe extern "C" {
+        static mut environ: *const *const c_char;
+    }
+
+    /// The raw entries of the current environment.
+    pub fn entries() -> Vec<Vec<u8>> {
+        let mut result = Vec::new();
+        // SAFETY: env is single-threaded; `environ` is either null or a
+        // null-terminated array of C strings.
+        unsafe {
+            let mut entry = environ;
+            if entry.is_null() {
+                return result;
+            }
+            while !(*entry).is_null() {
+                result.push(CStr::from_ptr(*entry).to_bytes().to_vec());
+                entry = entry.add(1);
+            }
+        }
+        result
+    }
+
+    /// Replace the process environment with `entries`. The storage is leaked
+    /// on purpose: it must stay valid until exec or exit.
+    pub fn install(entries: Vec<Vec<u8>>) {
+        let pointers: Vec<*const c_char> = entries
+            .into_iter()
+            .map(|e| {
+                // Entries come from splitting at NUL bytes, so this cannot fail.
+                CString::new(e).unwrap().into_raw().cast_const()
+            })
+            .chain(std::iter::once(std::ptr::null()))
+            .collect();
+        let pointers = Box::leak(pointers.into_boxed_slice());
+        // SAFETY: env is single-threaded; the array is null-terminated and
+        // lives for the rest of the process.
+        unsafe {
+            environ = pointers.as_ptr();
+        }
+    }
+
+    /// Print every entry of the environment as is.
+    pub fn print(line_ending: LineEnding) -> io::Result<()> {
+        let mut stdout = io::stdout().lock();
+        for entry in entries() {
+            stdout.write_all(&entry)?;
+            write!(stdout, "{line_ending}")?;
+        }
+        stdout.flush()
+    }
 }
 
 fn apply_unset_env_vars(opts: &Options<'_>) -> Result<(), Box<dyn UError>> {
