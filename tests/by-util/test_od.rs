@@ -1802,3 +1802,18 @@ fn test_strings_with_type_option_is_error() {
             .stderr_contains("no type may be specified when dumping strings");
     }
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // A stdin closed at startup is reported, not read as empty.
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.write("file", "ab");
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" od - file"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stdout_contains("0000000 061141\n")
+        .stderr_is("od: 'standard input': Bad file descriptor\n");
+}
