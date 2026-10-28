@@ -1236,3 +1236,23 @@ seq: %5.2c: invalid conversion specification
             .stderr_is("seq: %5.2c: invalid conversion specification\n");
     }
 }
+
+/// Output written to a standard output that was closed at startup is diagnosed.
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdout() {
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec >&-; \"$0\" seq 1"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stderr_is("seq: write error: Bad file descriptor\n");
+    // Nothing written, nothing to diagnose.
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec >&-; \"$0\" seq 1 0"])
+        .arg(&scene.bin_path)
+        .succeeds()
+        .no_output();
+}
