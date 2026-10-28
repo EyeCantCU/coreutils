@@ -18,6 +18,7 @@ doctest = false
 [dependencies]
 clap = { workspace = true }
 fluent = { workspace = true }
+memchr = { workspace = true }
 thiserror = { workspace = true }
 uucore = { workspace = true }
 
