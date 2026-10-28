@@ -1565,3 +1565,19 @@ fn test_bad_number_argument_quotes_control_chars() {
         .fails_with_code(1)
         .stderr_only("od: invalid suffix in -j argument '1\\t'\n");
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.write("file", "ab");
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" od - file"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stdout_contains("0000000 061141\n")
+        .stderr_is("od: 'standard input': Bad file descriptor\n");
+}
