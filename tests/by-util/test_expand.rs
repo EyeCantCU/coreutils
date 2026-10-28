@@ -486,3 +486,29 @@ fn test_stdbuf_line_buffered_stdout() {
         .with_current_output()
         .stdout_only("a       b\n");
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = uutests::util::TestScenario::new(uutests::util_name!());
+    scene.fixtures.write("file", "\ta\n");
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" expand - file"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stdout_is("        a\n")
+        .stderr_is("expand: -: Bad file descriptor\n");
+}
+
+#[test]
+fn test_stdin_operand_with_other_files() {
+    let (at, mut ucmd) = uutests::at_and_ucmd!();
+    at.write("file", "\tb\n");
+    ucmd.args(&["-", "file"])
+        .pipe_in("\ta\n")
+        .succeeds()
+        .stdout_is("        a\n        b\n");
+}
