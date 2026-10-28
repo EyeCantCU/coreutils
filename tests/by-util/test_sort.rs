@@ -7,6 +7,7 @@
 
 #![allow(clippy::cast_possible_wrap)]
 
+use regex::Regex;
 use rstest::rstest;
 use std::env;
 use std::fmt::Write as FmtWrite;
@@ -1788,6 +1789,32 @@ fn test_compress_merge() {
         ])
         .succeeds()
         .stdout_only_fixture("merge_ints_interleaved.expected");
+}
+
+/// A compression program that exits without reading its input must not kill
+/// sort with SIGPIPE: sort reports the failed write and exits with status 2.
+#[test]
+#[cfg(unix)]
+fn test_compress_program_exits_early() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.write("compress", "#!/bin/sh\nexec 0<&-\nexit 0\n");
+    std::fs::set_permissions(at.plus("compress"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    // More than a pipe buffer goes to the compression program, so writing it
+    // fails once the program has gone.
+    let lines = (0..100_000).fold(String::new(), |mut s, i| {
+        writeln!(s, "{i:06}").unwrap();
+        s
+    });
+    for name in ["a", "b", "c"] {
+        at.write(name, &lines);
+    }
+
+    ucmd.args(&["-m", "--batch-size=2", "--compress-program=./compress"])
+        .args(&["a", "b", "c"])
+        .fails_with_code(2)
+        .stderr_matches(&Regex::new("^sort: write failed: [^:]+: Broken pipe\n$").unwrap());
 }
 
 #[test]

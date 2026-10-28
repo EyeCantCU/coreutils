@@ -19,6 +19,7 @@ sort-read-failed = échec de lecture : {$error}
 sort-open-tmp-file-failed = échec d'ouverture du fichier temporaire : {$error}
 sort-compress-prog-execution-failed = impossible d'exécuter le programme de compression '{$prog}' : {$error}
 sort-compress-prog-terminated-abnormally = {$prog} s'est terminé anormalement
+sort-close-failed = échec de fermeture : {$path} : {$error}
 sort-cannot-create-tmp-file = impossible de créer un fichier temporaire dans {$path} :
 sort-file-operands-combined = opérande supplémentaire {$file}
     les opérandes de fichier ne peuvent pas être combinées avec --files0-from
