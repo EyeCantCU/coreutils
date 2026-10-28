@@ -13,7 +13,6 @@
 //! instant the real parser produced, only the final result is reported.
 
 use std::fmt::Write as _;
-use std::io::{Write, stderr};
 
 use jiff::civil::{Date, DateTime, Time};
 use jiff::tz::{AmbiguousOffset, Offset, TimeZone};
@@ -25,12 +24,15 @@ use super::FIXED_OFFSET_ABBREVIATIONS;
 const WEEKDAY_ABBREVIATIONS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 /// Print diagnostic lines to stderr, each prefixed with the utility name.
+///
+/// A failed write makes `date` exit with status 1, as for other diagnostics.
 pub(crate) fn emit<S: AsRef<str>>(lines: &[S]) {
     let name = uucore::util_name();
-    let mut err = stderr().lock();
+    let mut text = String::new();
     for line in lines {
-        let _ = writeln!(err, "{name}: {}", line.as_ref());
+        let _ = writeln!(text, "{name}: {}", line.as_ref());
     }
+    uucore::error::write_stderr(&text);
 }
 
 /// Explain how `input` was interpreted. `parsed` is the value the parser
