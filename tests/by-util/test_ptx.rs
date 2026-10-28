@@ -303,7 +303,7 @@ fn test_sentence_regexp_invalid_syntax_failure() {
     new_ucmd!()
         .args(&["-S", "^["])
         .fails()
-        .stderr_contains("Invalid regexp");
+        .stderr_contains("Invalid regular expression");
 }
 
 #[test]
@@ -454,7 +454,27 @@ fn test_invalid_regex_word_trailing_backslash() {
 
 #[test]
 fn test_invalid_regex_word_unclosed_group() {
-    new_ucmd!().args(&["-W", "(wrong"]).succeeds().no_stderr();
+    new_ucmd!()
+        .args(&["-W", "(wrong"])
+        .fails_with_code(1)
+        .stderr_only("ptx: Invalid regular expression (for regexp '(wrong')\n");
+}
+
+#[test]
+fn test_invalid_regex_reports_pattern() {
+    for opt in ["-S", "-W"] {
+        new_ucmd!()
+            .args(&[opt, "["])
+            .pipe_in("a\n")
+            .fails_with_code(1)
+            .stderr_only("ptx: Invalid regular expression (for regexp '[')\n");
+    }
+    // The sentence regexp is checked before the word regexp.
+    new_ucmd!()
+        .args(&["-W", "[", "-S", "[a"])
+        .pipe_in("a\n")
+        .fails_with_code(1)
+        .stderr_only("ptx: Invalid regular expression (for regexp '[a')\n");
 }
 
 #[test]

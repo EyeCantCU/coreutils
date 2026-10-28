@@ -35,6 +35,17 @@ fn escape_trailing_backslash(pattern: &str) -> String {
     }
 }
 
+/// Compile `pattern`, reporting a syntax error together with the regexp as the
+/// user wrote it (`original`), before any internal adjustment.
+fn compile_regex(pattern: &str, original: &str) -> UResult<Regex> {
+    Regex::new(pattern).map_err(|_| {
+        USimpleError::new(
+            1,
+            translate!("ptx-error-invalid-regexp", "regexp" => original.quote()),
+        )
+    })
+}
+
 #[derive(Debug, PartialEq)]
 enum OutFormat {
     Dumb,
@@ -162,7 +173,12 @@ impl WordFilter {
             matches
                 .get_one::<String>(options::WORD_REGEXP)
                 .filter(|v| !v.is_empty())
-                .map(|v| escape_trailing_backslash(v))
+                .map(|v| -> UResult<String> {
+                    let pattern = escape_trailing_backslash(v);
+                    compile_regex(&pattern, v)?;
+                    Ok(pattern)
+                })
+                .transpose()?
         } else {
             None
         };
@@ -209,21 +225,14 @@ fn get_config(matches: &mut clap::ArgMatches) -> UResult<Config> {
         config.format = OutFormat::Roff;
         "[^ \t\n]+".clone_into(&mut config.context_regex);
     }
-    if let Some(regex) = matches
-        .remove_one::<String>(options::SENTENCE_REGEXP)
-        .map(|r| escape_trailing_backslash(&r))
-    {
+    if let Some(original) = matches.remove_one::<String>(options::SENTENCE_REGEXP) {
+        let regex = escape_trailing_backslash(&original);
         // TODO: The regex crate used here is not fully compatible with GNU's regex implementation.
         // For example, it does not support backreferences.
         // In the future, we might want to switch to the fancy-regex crate for better compatibility.
 
         // Verify regex is valid and doesn't match empty string
-        let re = Regex::new(&regex).map_err(|error| {
-            USimpleError::new(
-                1,
-                translate!("ptx-error-invalid-regexp", "error" => error.to_string()),
-            )
-        })?;
+        let re = compile_regex(&regex, &original)?;
         if re.is_match("") {
             return Err(USimpleError::new(1, translate!("ptx-error-empty-regexp")));
         }
