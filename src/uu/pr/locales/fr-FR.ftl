@@ -84,6 +84,9 @@ pr-help-join-lines =
   fusionner les lignes complètes, désactive la troncature de ligne -W, aucun
                   alignement de colonne, --sep-string[=CHAÎNE] définit les séparateurs
 pr-help-expand-tabs = convertir les CHARs d'entrée (TABs) en largeur de tabulation WIDTH (8)
+pr-help-output-tabs = remplacer les espaces par des CHARs (TABs) de largeur de tabulation WIDTH (8)
+pr-help-show-control-chars = utiliser la notation circonflexe (^G) et la notation octale avec barre oblique inverse
+pr-help-show-nonprinting = utiliser la notation octale avec barre oblique inverse
 pr-help-help = Afficher les informations d'aide
 
 # Texte d'en-tête de page
@@ -99,7 +102,19 @@ pr-error-socket-not-supported = pr : impossible d'ouvrir {$file}, Opération non
 pr-error-no-such-file = pr : impossible d'ouvrir {$file}, Aucun fichier ou répertoire de ce type
 pr-error-column-merge-conflict = impossible de spécifier le nombre de colonnes lors de l'impression en parallèle
 pr-error-across-merge-conflict = impossible de spécifier à la fois l'impression transversale et l'impression en parallèle
-pr-error-invalid-pages-range = argument --pages invalide '{$start}:{$end}'
 pr-error-starting-page-exceeds-page-count = le numéro de page de début {$start} dépasse le nombre de pages {$count}
-pr-error-invalid-expand-tab-argument = Caractères supplémentaires ou nombre invalide dans l'argument de '-e': '{$arg}'
-pr-error-invalid-number-argument = Caractères supplémentaires ou nombre invalide dans l'argument de '-n': '{$arg}'
+pr-error-invalid-char-width-argument = Caractères supplémentaires ou nombre invalide dans l'argument de '-{$option}' : {$arg}
+pr-error-empty-argument = '-{$option}' : Argument invalide : ''
+pr-error-invalid-pages-argument = argument {$option} invalide {$arg}
+pr-error-invalid-page-range = plage de pages invalide {$arg}
+pr-error-invalid-pages-suffix = suffixe invalide dans l'argument {$option} {$arg}
+pr-error-pages-too-large = argument {$option} {$arg} trop grand
+pr-error-invalid-columns = nombre de colonnes invalide
+pr-error-invalid-page-length = '-l PAGE_LENGTH' nombre de lignes invalide
+pr-error-invalid-page-width = '-{$option} PAGE_WIDTH' nombre de caractères invalide
+pr-error-invalid-first-line-number = '-N NUMBER' numéro de ligne de départ invalide
+pr-error-invalid-indent = '-o MARGIN' décalage de ligne invalide
+pr-error-out-of-range = Résultat numérique hors limites
+pr-error-value-too-large = Valeur trop grande pour le type de données défini
+pr-error-page-width-too-narrow = largeur de page trop étroite
+pr-error-integer-overflow = dépassement d'entier
