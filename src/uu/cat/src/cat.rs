@@ -389,7 +389,10 @@ fn cat_path(path: &OsString, options: &OutputOptions, state: &mut OutputState) -
             };
             cat_handle(&mut handle, options, state)
         }
-        InputType::Directory => Err(CatError::IsDirectory),
+        // On Linux the read itself reports EISDIR, or any other read error.
+        InputType::Directory if cfg!(not(any(target_os = "linux", target_os = "android"))) => {
+            Err(CatError::IsDirectory)
+        }
         #[cfg(unix)]
         InputType::Socket => Err(CatError::NoSuchDeviceOrAddress),
         _ => {
