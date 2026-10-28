@@ -162,8 +162,16 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             write_factors_str(number.trim().as_bytes(), &mut w, print_exponents)?;
         }
     } else {
+        // A stdin closed at startup is reported like any other read error.
+        #[cfg(all(unix, not(target_os = "fuchsia")))]
+        let closed_stdin = uucore::signals::ensure_stdin_open().err();
+        #[cfg(not(all(unix, not(target_os = "fuchsia"))))]
+        let closed_stdin = None;
         let stdin = stdin();
-        let lines = stdin.lock().split(LF);
+        let lines = closed_stdin
+            .map(Err)
+            .into_iter()
+            .chain(stdin.lock().split(LF));
         for line in lines {
             match line {
                 Ok(line) => {
