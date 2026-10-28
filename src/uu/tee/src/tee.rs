@@ -147,6 +147,15 @@ impl MultiWriter {
         #[cfg(not(any(unix, target_os = "wasi")))]
         use io::Read as _;
         const BUF_SIZE: usize = 32 * 1024;
+        // A closed stdin is reopened as /dev/null before `uumain` runs, so
+        // reading it would succeed silently instead of failing with EBADF.
+        if let Err(e) = uucore::signals::ensure_stdin_open() {
+            show_error!(
+                "{}",
+                translate!("tee-error-stdin", "error" => strip_errno(&e))
+            );
+            return Err(());
+        }
         #[cfg(any(unix, target_os = "wasi"))]
         let input = rustix::stdio::stdin();
         #[cfg(not(any(unix, target_os = "wasi")))]

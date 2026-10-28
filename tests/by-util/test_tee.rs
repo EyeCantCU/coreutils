@@ -5,7 +5,7 @@
 
 #![allow(clippy::borrow_as_ptr)]
 
-use uutests::{at_and_ucmd, new_ucmd};
+use uutests::{at_and_ucmd, new_ucmd, util::TestScenario, util_name};
 
 use regex::Regex;
 use std::process::Stdio;
@@ -778,4 +778,18 @@ fn test_write_failure_reports_error_and_nonzero_exit() {
     let result = ucmd.arg("out_dir").pipe_in("data").fails();
 
     assert!(!result.stderr_str().is_empty());
+}
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" tee"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stderr_contains("tee: read error: Bad file descriptor");
 }
