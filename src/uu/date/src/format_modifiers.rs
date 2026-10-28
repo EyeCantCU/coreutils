@@ -40,11 +40,11 @@ use std::fmt;
 use uucore::translate;
 
 /// Upper bound on the field width we will allocate for. Anything wider is
-/// rejected as `FieldWidthTooLarge` instead of being handed to the allocator.
-/// A huge request (e.g. `%6666666666666D`) would otherwise abort the process
-/// under a sanitizer before `try_reserve` could fail gracefully, and OOM
-/// elsewhere.
-const MAX_FORMAT_WIDTH: usize = u16::MAX as usize;
+/// rejected here as `FieldWidthTooLarge` instead of being handed to the
+/// allocator: a huge request (e.g. `%6666666666666D`) would otherwise abort the
+/// process under a sanitizer before `try_reserve` could fail gracefully, and
+/// OOM elsewhere. The caller writes the padding of wider fields as a stream.
+pub(crate) const MAX_FORMAT_WIDTH: usize = u16::MAX as usize;
 
 /// Error type for format modifier operations
 #[derive(Debug)]
@@ -86,17 +86,17 @@ fn field_width_too_large(width: usize, specifier: &str) -> FormatError {
 }
 
 /// A parsed `%`-format specifier: `%[flags][width][:colons]<letter>`.
-struct ParsedSpec<'a> {
+pub(crate) struct ParsedSpec<'a> {
     /// Flag characters from `[_0^#+-]`.
-    flags: &'a str,
+    pub(crate) flags: &'a str,
     /// Explicit width, if present. `None` means no width was specified.
     /// A value that overflows `usize` is represented as `Some(usize::MAX)` so
     /// the downstream allocation check surfaces it as `FieldWidthTooLarge`.
-    width: Option<usize>,
+    pub(crate) width: Option<usize>,
     /// The specifier itself, including any leading colons (e.g. `Y`, `:z`, `::z`).
-    spec: &'a str,
+    pub(crate) spec: &'a str,
     /// Total byte length of the parsed sequence including the leading `%`.
-    len: usize,
+    pub(crate) len: usize,
 }
 
 /// Try to parse a format spec at the start of `s`.
@@ -104,7 +104,7 @@ struct ParsedSpec<'a> {
 /// Implements the grammar `%[_0^#+-]*[0-9]*:{0,3}[a-zA-Z]` anchored at the
 /// beginning of `s`. Returns `None` if `s` does not start with `%` or no
 /// valid specifier follows.
-fn parse_format_spec(s: &str) -> Option<ParsedSpec<'_>> {
+pub(crate) fn parse_format_spec(s: &str) -> Option<ParsedSpec<'_>> {
     let bytes = s.as_bytes();
     bytes.first().filter(|b| *b == &b'%')?;
 

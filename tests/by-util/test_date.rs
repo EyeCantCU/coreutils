@@ -2840,20 +2840,64 @@ fn test_date_format_modifier_percent_escape() {
 fn test_date_format_modifier_huge_width_fails_without_abort() {
     // GNU date also exits with failure for extremely large width.
     // Assert exit code only to avoid coupling to implementation-specific error text.
-    let format = format!("+%{}c", usize::MAX);
+    let format = format!("+%{}c", u64::MAX);
     new_ucmd!().arg(&format).fails().code_is(1);
 }
 
+/// Widths up to `i64::MAX` are accepted; a wider field, or one that would make
+/// the line longer than that, ends the line before it and fails.
 #[test]
-fn test_date_format_modifier_parseable_huge_width_fails_without_hanging() {
-    // Target pointer width can affect the reported parsed width, so assert the
-    // stable diagnostic shape instead of the exact oversized literal.
+fn test_date_format_modifier_width_above_i64_max_fails() {
     new_ucmd!()
-        .arg("+%8888888888888s")
+        .arg("+a%9223372036854775808sb")
         .fails()
         .code_is(1)
-        .stderr_contains("format modifier width '")
-        .stderr_contains("' is too large for specifier '%s'");
+        .stdout_is("a\n")
+        .stderr_contains(
+            "format modifier width '9223372036854775808' is too large for specifier '%s'",
+        );
+    new_ucmd!()
+        .arg("+ab%9223372036854775806cy")
+        .fails()
+        .code_is(1)
+        .stdout_is("ab\n")
+        .stderr_contains("is too large for specifier '%c'");
+}
+
+/// The padding of a field too wide to hold in memory is written as it is
+/// produced, so writing it to a full device reports the write error.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_date_format_modifier_huge_width_write_error() {
+    use std::fs::OpenOptions;
+    for format in ["+%9223372036854775807c", "+%_2147483648Y"] {
+        let dev_full = OpenOptions::new().write(true).open("/dev/full").unwrap();
+        new_ucmd!()
+            .arg(format)
+            .set_stdout(dev_full)
+            .fails()
+            .code_is(1)
+            .stderr_contains("write error");
+    }
+}
+
+/// A field wider than what is padded in memory keeps the padding character
+/// and the sign placement of narrower ones.
+#[test]
+fn test_date_format_modifier_streamed_width() {
+    let pad = |c: char, n: usize| c.to_string().repeat(n);
+    let expected = format!(
+        "+{}1969|31|{}31|{}pm\n",
+        pad('0', 70000 - 5),
+        pad(' ', 65534),
+        pad(' ', 65534),
+    );
+    new_ucmd!()
+        .env("TZ", "UTC")
+        .args(&["-d", "1969-12-31 23:59:58.5"])
+        .arg("+%+70000Y|%-70000d|%_65536e|%#65536p")
+        .succeeds()
+        .stdout_only(expected);
 }
 
 #[test]
