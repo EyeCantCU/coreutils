@@ -627,12 +627,39 @@ fn test_date_for_no_permission_file() {
 
 #[test]
 fn test_date_for_dir_as_file() {
-    let result = new_ucmd!().arg("--file").arg("/").fails_with_code(1);
-    result.no_stdout();
-    assert_eq!(
-        result.stderr_str().trim(),
-        "date: expected file, got directory '/'",
-    );
+    let expected = if cfg!(any(target_os = "linux", target_os = "android")) {
+        "date: /: read error: Is a directory\n"
+    } else {
+        "date: expected file, got directory '/'\n"
+    };
+    new_ucmd!()
+        .arg("--file")
+        .arg("/")
+        .fails_with_code(1)
+        .stderr_only(expected);
+}
+
+#[test]
+#[cfg(all(target_os = "linux", not(wasi_runner)))]
+fn test_date_file_read_error() {
+    new_ucmd!()
+        .args(&["--file", "/proc/self/mem"])
+        .fails_with_code(1)
+        .stderr_only("date: /proc/self/mem: read error: Input/output error\n");
+}
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_date_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" date --file=-"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stderr_only("date: 'standard input': read error: Bad file descriptor\n");
 }
 
 #[test]
