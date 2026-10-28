@@ -1402,3 +1402,18 @@ fn test_zero_precision_above_formatter_limit() {
         .succeeds()
         .stdout_only(format!("0.{}", &zeros[1..]));
 }
+
+/// A warning that cannot be written to stderr makes the exit status a failure.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_unwritable_warning_fails() {
+    let dev_full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    new_ucmd!()
+        .args(&["foo", "bar"])
+        .set_stderr(dev_full)
+        .fails_with_code(1)
+        .stdout_is("foo");
+}
