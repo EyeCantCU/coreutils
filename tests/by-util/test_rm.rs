@@ -3,7 +3,7 @@
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-// spell-checker:ignore rootlink dotdot rootfile deleteme keepme topfile mkdirat RDONLY FDCWD SIGSEGV rootbind submounts rprivate rbind overlayfs ENAMETOOLONG
+// spell-checker:ignore rootlink dotdot rootfile deleteme keepme topfile mkdirat RDONLY FDCWD SIGSEGV rootbind submounts rprivate rbind overlayfs ENAMETOOLONG unlinkat getdents
 #![allow(clippy::stable_sort_primitive)]
 
 use std::process::Stdio;
@@ -1667,6 +1667,59 @@ fn test_preserve_root_literal_root() {
         .fails()
         .stderr_contains("it is dangerous to operate recursively on '/'")
         .stderr_contains("use --no-preserve-root to override this failsafe");
+}
+
+/// A directory whose listing fails is reported with the read error: as
+/// "cannot remove" when nothing could be read, and as "traversal failed" once
+/// some entries were read and removed. `strace` injects the failing reads.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_rm_read_dir_failure() {
+    use std::process::Command;
+
+    let ts = TestScenario::new(util_name!());
+    let bin = ts.bin_path.to_string_lossy().into_owned();
+    let run = |when: &str| {
+        ts.fixtures.mkdir_all("dir/sub");
+        Command::new("strace")
+            .args(["-o", "/dev/null", "-e"])
+            .arg(format!("fault=getdents64:error=EIO:when={when}"))
+            .args([&bin, "rm", "-Rf", "dir"])
+            .current_dir(&ts.fixtures.subdir)
+            .env("LC_ALL", "C")
+            .output()
+    };
+
+    // The first read of "dir" fails: nothing is removed.
+    let Ok(output) = run("1") else {
+        eprintln!("TEST SKIPPED: strace is not available");
+        return;
+    };
+    if output.status.success() || !ts.fixtures.dir_exists("dir/sub") {
+        eprintln!("TEST SKIPPED: strace syscall injection is not available");
+        return;
+    }
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "rm: cannot remove 'dir': Input/output error\n"
+    );
+    assert_eq!(output.status.code(), Some(1));
+
+    // The read after the first batch fails: "sub" is removed, "dir" is kept.
+    let output = run("2").expect("failed to spawn strace");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "rm: traversal failed: dir: Input/output error\n"
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(ts.fixtures.dir_exists("dir"));
+    assert!(!ts.fixtures.dir_exists("dir/sub"));
+
+    // Only the read of the empty "sub" fails: removing it still succeeds.
+    let output = run("3").expect("failed to spawn strace");
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert!(!ts.fixtures.dir_exists("dir"));
 }
 
 // Regression tests for Issue #9749: rm -rf ./ and variants silently delete

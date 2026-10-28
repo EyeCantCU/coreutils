@@ -112,15 +112,21 @@ impl From<SafeTraversalError> for io::Error {
     }
 }
 
-// Helper function to read directory entries using nix
-fn read_dir_entries(fd: &OwnedFd) -> io::Result<Vec<OsString>> {
+// Helper function to read directory entries using nix. Entries read before a
+// failure are returned along with the error.
+fn read_dir_entries_partial(fd: &OwnedFd) -> (Vec<OsString>, io::Result<()>) {
     let mut entries = Vec::new();
 
     // Duplicate the fd for Dir (it takes ownership)
-    let dup_fd = nix::unistd::dup(fd).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
-    let mut dir = Dir::from_fd(dup_fd).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+    let mut dir = match nix::unistd::dup(fd).and_then(Dir::from_fd) {
+        Ok(dir) => dir,
+        Err(e) => return (entries, Err(io::Error::from_raw_os_error(e as i32))),
+    };
     for entry_result in dir.iter() {
-        let entry = entry_result.map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+        let entry = match entry_result {
+            Ok(entry) => entry,
+            Err(e) => return (entries, Err(io::Error::from_raw_os_error(e as i32))),
+        };
         let name = entry.file_name();
         let name_os = OsStr::from_bytes(name.to_bytes());
         if name_os != "." && name_os != ".." {
@@ -128,7 +134,12 @@ fn read_dir_entries(fd: &OwnedFd) -> io::Result<Vec<OsString>> {
         }
     }
 
-    Ok(entries)
+    (entries, Ok(()))
+}
+
+fn read_dir_entries(fd: &OwnedFd) -> io::Result<Vec<OsString>> {
+    let (entries, result) = read_dir_entries_partial(fd);
+    result.map(|()| entries)
 }
 
 /// A directory file descriptor that enables safe traversal
@@ -231,6 +242,12 @@ impl DirFd {
             source: io::Error::from_raw_os_error(e as i32),
         })?;
         Ok(stat)
+    }
+
+    /// Read directory entries, keeping those read before a failure: the
+    /// returned error, if any, is the raw one from reading the directory.
+    pub fn read_dir_partial(&self) -> (Vec<OsString>, io::Result<()>) {
+        read_dir_entries_partial(&self.fd)
     }
 
     /// Read directory entries
