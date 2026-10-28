@@ -24,7 +24,7 @@ use std::thread;
 use std::time::SystemTime;
 use uucore::diagnostics::OptionValue;
 use uucore::display::{Quotable, print_verbatim};
-use uucore::error::{FromIo, UError, UResult, USimpleError, set_exit_code};
+use uucore::error::{FromIo, UError, UResult, USimpleError};
 use uucore::fs::SYMLINK_FOLLOW_LIMIT;
 use uucore::fsext::{MetadataTimeField, metadata_get_time};
 use uucore::line_ending::LineEnding;
@@ -37,7 +37,7 @@ use uucore::parser::parse_glob;
 use uucore::parser::parse_size::{ParseSizeError, parse_size_u64};
 use uucore::parser::shortcut_value_parser::ShortcutValueParser;
 use uucore::time::{FormatSystemTimeFallback, format, format_system_time};
-use uucore::{format_usage, show, show_error, show_warning};
+use uucore::{format_usage, show, show_warning};
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::HANDLE;
 #[cfg(windows)]
@@ -954,8 +954,19 @@ impl StatPrinter {
     }
 }
 
-/// Read file paths from the specified file, separated by null characters
-fn read_files_from(file_name: &OsStr) -> io::Result<Vec<PathBuf>> {
+/// An entry of a `--files0-from` list that is not a file to process.
+enum FilesFromError {
+    /// An invalid name, reported in turn with the results.
+    Invalid(Box<dyn UError>),
+    /// Reading the list failed, which ends it.
+    Read(io::Error),
+}
+
+/// Read the NUL-separated names in `file_name` lazily, so that an endless
+/// list is processed as it arrives rather than collected first.
+fn read_files_from(
+    file_name: &OsStr,
+) -> io::Result<impl Iterator<Item = Result<PathBuf, FilesFromError>> + use<>> {
     let reader: Box<dyn BufRead> = if file_name == "-" {
         // Read from standard input
         Box::new(BufReader::new(io::stdin()))
@@ -980,31 +991,31 @@ fn read_files_from(file_name: &OsStr) -> io::Result<Vec<PathBuf>> {
         }
     };
 
-    let mut paths = Vec::new();
-
-    for (i, line) in reader.split(b'\0').enumerate() {
-        let path = line?;
-
-        if path.is_empty() {
-            let line_number = i + 1;
-            show_error!(
-                "{}",
-                translate!("du-error-invalid-zero-length-file-name", "file" => file_name.maybe_quote(), "line" => line_number)
-            );
-            set_exit_code(1);
-        } else if path == b"-" && file_name == "-" {
-            show_error!("{}", translate!("du-error-hyphen-file-name-not-allowed"));
-            set_exit_code(1);
-        } else {
-            // Do not deduplicate here: GNU du processes every entry and
-            // relies on inode-based deduplication during traversal (which is
-            // disabled by --count-links). Deduplicating by name would, e.g.,
-            // collapse repeated missing files into a single error.
-            paths.push(PathBuf::from(uucore::os_str_from_bytes(&path).unwrap()));
-        }
-    }
-
-    Ok(paths)
+    let file_name = file_name.to_os_string();
+    Ok(reader
+        .split(b'\0')
+        .enumerate()
+        .map(move |(i, line)| {
+            let path = line.map_err(FilesFromError::Read)?;
+            if path.is_empty() {
+                let line_number = i + 1;
+                Err(FilesFromError::Invalid(USimpleError::new(
+                    1,
+                    translate!("du-error-invalid-zero-length-file-name", "file" => file_name.maybe_quote(), "line" => line_number),
+                )))
+            } else if path == b"-" && file_name == "-" {
+                Err(FilesFromError::Invalid(USimpleError::new(
+                    1,
+                    translate!("du-error-hyphen-file-name-not-allowed"),
+                )))
+            } else {
+                // Do not deduplicate here: GNU du processes every entry and
+                // relies on inode-based deduplication during traversal (which is
+                // disabled by --count-links). Deduplicating by name would, e.g.,
+                // collapse repeated missing files into a single error.
+                Ok(PathBuf::from(uucore::os_str_from_bytes(&path).unwrap()))
+            }
+        }))
 }
 
 fn get_size_format_flag_arg_index_if_present(matches: &ArgMatches, arg: &str) -> Option<usize> {
@@ -1097,14 +1108,33 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             );
         }
 
-        read_files_from(file_from)?
+        Box::new(read_files_from(file_from)?) as Box<dyn Iterator<Item = _>>
     } else if let Some(files) = matches.get_many::<OsString>(options::FILE) {
         // Do not deduplicate by name: GNU du processes every operand and relies
         // on inode-based deduplication during traversal (disabled by
         // --count-links), so repeated missing files are reported once each.
-        files.map(PathBuf::from).collect()
+        let files: Vec<PathBuf> = files.map(PathBuf::from).collect();
+        Box::new(files.into_iter().map(Ok))
     } else {
-        vec![PathBuf::from(".")]
+        Box::new(vec![PathBuf::from(".")].into_iter().map(Ok))
+    };
+    // Dereferencing the operands needs them all up front.
+    let (files, deref_args) = if matches.get_flag(options::DEREFERENCE_ARGS) {
+        let mut paths = Vec::new();
+        for file in files {
+            match file {
+                Ok(path) => paths.push(path),
+                Err(FilesFromError::Invalid(e)) => show!(e),
+                Err(FilesFromError::Read(e)) => return Err(e.into()),
+            }
+        }
+        let files = paths;
+        (
+            Box::new(files.clone().into_iter().map(Ok)) as Box<dyn Iterator<Item = _>>,
+            files,
+        )
+    } else {
+        (files, Vec::new())
     };
 
     let time = matches.contains_id(options::TIME).then(|| {
@@ -1122,8 +1152,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         dereference: if matches.get_flag(options::DEREFERENCE) {
             Deref::All
         } else if matches.get_flag(options::DEREFERENCE_ARGS) {
-            // We don't care about the cost of cloning as it is rarely used
-            Deref::Args(files.clone())
+            Deref::Args(deref_args)
         } else {
             Deref::None
         },
@@ -1183,7 +1212,21 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     // Check existence of path provided in argument
     let mut seen_inodes: FxHashSet<FileInfo> = FxHashSet::default();
 
+    let mut read_error = None;
     'loop_file: for path in files {
+        let path = match path {
+            Ok(path) => path,
+            Err(FilesFromError::Invalid(e)) => {
+                if print_tx.send(Err(e)).is_err() {
+                    break;
+                }
+                continue;
+            }
+            Err(FilesFromError::Read(e)) => {
+                read_error = Some(e);
+                break;
+            }
+        };
         // Skip if we don't want to ignore anything
         if !&traversal_options.excludes.is_empty() {
             let path_string = path.to_string_lossy();
@@ -1231,9 +1274,10 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                     Some(stat),
                 ) {
                     Ok(stat) => {
-                        print_tx
-                            .send(Ok(StatPrintInfo { stat, depth: 0 }))
-                            .map_err(|e| USimpleError::new(1, e.to_string()))?;
+                        if print_tx.send(Ok(StatPrintInfo { stat, depth: 0 })).is_err() {
+                            // The printing thread stopped; its error is reported below.
+                            break 'loop_file;
+                        }
                     }
                     Err(e) => {
                         // Check if this is our "already handled" error
@@ -1243,14 +1287,15 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                             // Error already handled, continue to next file
                             continue 'loop_file;
                         }
-                        return Err(USimpleError::new(1, e.to_string()));
+                        // The printing thread stopped; its error is reported below.
+                        break 'loop_file;
                     }
                 }
             }
         } else {
             // Use regular traversal (non-Linux or when -L is used)
             if let Ok(stat) = stat {
-                let stat = du_regular(
+                let Ok(stat) = du_regular(
                     stat,
                     &traversal_options,
                     0,
@@ -1258,12 +1303,12 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                     &print_tx,
                     None,
                     None,
-                )
-                .map_err(|e| USimpleError::new(1, e.to_string()))?;
-
-                print_tx
-                    .send(Ok(StatPrintInfo { stat, depth: 0 }))
-                    .map_err(|e| USimpleError::new(1, e.to_string()))?;
+                ) else {
+                    break 'loop_file;
+                };
+                if print_tx.send(Ok(StatPrintInfo { stat, depth: 0 })).is_err() {
+                    break 'loop_file;
+                }
             } else {
                 #[cfg(unix)]
                 let error_msg = translate!("du-error-cannot-access", "path" => path.quote());
@@ -1271,9 +1316,9 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
                 let error_msg =
                     translate!("du-error-cannot-access-no-such-file", "path" => path.quote());
 
-                print_tx
-                    .send(Err(USimpleError::new(1, error_msg)))
-                    .map_err(|e| USimpleError::new(1, e.to_string()))?;
+                if print_tx.send(Err(USimpleError::new(1, error_msg))).is_err() {
+                    break 'loop_file;
+                }
             }
         }
     }
@@ -1284,7 +1329,10 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         .join()
         .map_err(|_| USimpleError::new(1, translate!("du-error-printing-thread-panicked")))??;
 
-    Ok(())
+    match read_error {
+        Some(e) => Err(e.into()),
+        None => Ok(()),
+    }
 }
 
 // Parse --time-style argument, falling back to environment variable if necessary.
