@@ -1311,7 +1311,7 @@ fn test_read_error() {
     new_ucmd!()
         .args(&["-c1", "/proc/self/mem"])
         .fails_with_code(1)
-        .stderr_is("cut: Input/output error\n");
+        .stderr_is("cut: /proc/self/mem: Input/output error\n");
 }
 
 #[cfg(unix)]
@@ -1426,4 +1426,35 @@ cut: invalid decreasing range
         );
         assert!(!stderr.contains('\u{256d}'), "{stderr}");
     }
+}
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // A stdin closed at startup is reported, not read as empty.
+    let scene = uutests::util::TestScenario::new(uutests::util_name!());
+    scene.fixtures.write("file", "ab\n");
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" cut -b1 - file"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stdout_is("a\n")
+        .stderr_is("cut: -: Bad file descriptor\n");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_unreadable_directory() {
+    // The open error is reported, not "Is a directory" from the metadata.
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    let (at, mut ucmd) = uutests::at_and_ucmd!();
+    at.mkdir("dir");
+    at.set_mode("dir", 0o000);
+    ucmd.args(&["-f1", "dir"])
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("cut: dir: Permission denied\n");
 }
