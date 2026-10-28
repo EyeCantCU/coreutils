@@ -250,11 +250,18 @@ where
         let mut file = io::BufReader::with_capacity(
             READ_BUFFER_SIZE,
             if filename == "-" {
+                #[cfg(all(feature = "signals", unix, not(target_os = "fuchsia")))]
+                if let Err(err) = crate::signals::ensure_stdin_open() {
+                    show!(err.map_err_context(|| locale_aware_shell_escape(filename)));
+                    continue;
+                }
                 stdin_buf = io::stdin();
                 Box::new(stdin_buf) as Box<dyn io::Read>
             } else {
                 let filepath = Path::new(filename);
-                if filepath.is_dir() {
+                // Reading a directory fails with EISDIR on Linux, so let the
+                // read report it (or any other read error) there.
+                if cfg!(not(any(target_os = "linux", target_os = "android"))) && filepath.is_dir() {
                     show!(USimpleError::new(
                         1,
                         translate!(
@@ -287,8 +294,13 @@ where
 
         // Always compute the "binary" version of the digest, i.e. on Windows,
         // never handle CRLFs specifically.
-        let (digest_output, sz) = digest_reader(&mut digest, &mut file, ReadingMode::Binary)
-            .map_err_context(|| translate!("checksum-error-failed-to-read-input"))?;
+        let (digest_output, sz) = match digest_reader(&mut digest, &mut file, ReadingMode::Binary) {
+            Ok(result) => result,
+            Err(err) => {
+                show!(err.map_err_context(|| locale_aware_shell_escape(filename)));
+                continue;
+            }
+        };
 
         // Encodes the sum if df is Base64, leaves as-is otherwise.
         let encode_sum = |sum: DigestOutput, df: DigestFormat| {
