@@ -1039,3 +1039,19 @@ fn test_other_numeric_options_still_reject_values_above_the_limit() {
             .stderr_contains("invalid value '18446744073709551616'");
     }
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // Reading a closed stdin fails with EBADF. Run through a shell so the
+    // process really starts with fd 0 closed.
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.write("file", "a\n");
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" nl - file"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stdout_is("     1\ta\n")
+        .stderr_is("nl: -: Bad file descriptor\n");
+}

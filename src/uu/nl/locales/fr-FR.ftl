@@ -29,7 +29,6 @@ nl-help-number-width = utiliser NUMBER colonnes pour les numéros de ligne
 
 # Messages d'erreur
 nl-error-invalid-arguments = Arguments fournis invalides.
-nl-error-could-not-read-line = impossible de lire la ligne
 nl-error-could-not-write = impossible d'écrire la sortie
 nl-error-line-number-overflow = débordement du numéro de ligne
 nl-error-invalid-regex = expression régulière invalide
