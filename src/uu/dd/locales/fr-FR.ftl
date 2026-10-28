@@ -81,6 +81,7 @@ dd-standard-output = 'sortie standard'
 
 # Error messages
 dd-error-failed-to-open = échec de l'ouverture de { $path }
+dd-error-reading = erreur de lecture de { $file }
 dd-error-write-error = erreur d'écriture
 dd-error-failed-to-seek = échec de la recherche dans le fichier de sortie
 dd-error-failed-to-truncate = échec de la troncature à { $size } octets du fichier de sortie { $file }

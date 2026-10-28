@@ -2710,3 +2710,17 @@ fn test_ascii_ebcdic_without_cbs_still_convert() {
             .stdout_only_bytes(expected);
     }
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // A stdin closed at startup is reported, not read as empty.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" dd"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("dd: error reading 'standard input': Bad file descriptor\n");
+}

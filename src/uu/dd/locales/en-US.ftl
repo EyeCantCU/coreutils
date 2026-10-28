@@ -81,6 +81,7 @@ dd-standard-output = 'standard output'
 
 # Error messages
 dd-error-failed-to-open = failed to open { $path }
+dd-error-reading = error reading { $file }
 dd-error-write-error = write error
 dd-error-failed-to-seek = failed to seek in output file
 dd-error-failed-to-truncate = failed to truncate to { $size } bytes in output file { $file }
