@@ -18,7 +18,7 @@ use std::os::unix::ffi::OsStrExt;
 use thiserror::Error;
 use uucore::diagnostics::OptionValue;
 use uucore::display::Quotable;
-use uucore::error::{FromIo, UError, UResult, USimpleError, set_exit_code};
+use uucore::error::{FromIo, UError, UResult, USimpleError, UUsageError, set_exit_code};
 use uucore::i18n::collator::{
     AlternateHandling, CollatorOptions, locale_cmp, should_use_locale_collation, try_init_collator,
 };
@@ -772,7 +772,11 @@ fn get_and_parse_field_number(matches: &clap::ArgMatches, key: &str) -> UResult<
 /// This function takes the matches from the command-line arguments, processes them,
 /// and returns a `Settings` struct that encapsulates the configuration for the program.
 #[allow(clippy::field_reassign_with_default)]
-fn parse_settings(matches: &clap::ArgMatches, diag_args: Option<&[OsString]>) -> UResult<Settings> {
+fn parse_settings(
+    matches: &clap::ArgMatches,
+    diag_args: Option<&[OsString]>,
+    field_lists: &[FieldList],
+) -> UResult<Settings> {
     let keys = get_and_parse_field_number(matches, "j")?;
     let key1 = get_and_parse_field_number(matches, "1")?;
     let key2 = get_and_parse_field_number(matches, "2")?;
@@ -791,24 +795,27 @@ fn parse_settings(matches: &clap::ArgMatches, diag_args: Option<&[OsString]>) ->
     if let Some(value_os) = matches.get_one::<OsString>("t") {
         settings.separator = parse_separator(value_os)?;
     }
-    if let Some(formats) = matches.get_many::<String>("o") {
-        let formats: Vec<&String> = formats.collect();
+    if !field_lists.is_empty() {
         // GNU lets `-o` repeat and accumulates the fields. Auto mode applies only
         // when every value is exactly `auto`; otherwise each `auto` is ignored.
-        if formats.iter().all(|f| *f == "auto") {
+        if field_lists.iter().all(|f| f.text == "auto") {
             settings.autoformat = true;
         } else {
             let mut specs = vec![];
-            for format in formats {
-                if format == "auto" {
+            for list in field_lists {
+                if list.from_option && list.text == "auto" {
                     continue;
                 }
+                let format = &list.text;
                 // `-o` has no long form.
                 let option = OptionValue::with_names(format, Some('o'), None);
                 // Each field carries its place in the value, so that the caret can
                 // take the one that is at fault out of a long list.
                 for (part, span) in uucore::diagnostics::list_items(format, &[' ', ',', '\t']) {
                     specs.push(Spec::parse(part).map_err(|error| {
+                        if !list.from_option {
+                            return error;
+                        }
                         let message = error.to_string();
                         uucore::diagnostics::error_after_report(diag_args, error, |args, _| {
                             uucore::diagnostics::Snapshot::with_program(args).render_option(
@@ -847,24 +854,160 @@ fn parse_settings(matches: &clap::ArgMatches, diag_args: Option<&[OsString]>) ->
     Ok(settings)
 }
 
+/// One element of the `-o` field list, as written on the command line.
+struct FieldList {
+    text: String,
+    /// Whether this is the value of an `-o` option, rather than an operand.
+    from_option: bool,
+}
+
+/// Counts the arguments that follow the `--` that ends the options.
+fn count_after_separator(args: &[OsString]) -> usize {
+    // The short options that take a value.
+    const WITH_VALUE: &[u8] = b"aejotv12";
+    let mut iter = args.iter().skip(1).enumerate();
+    while let Some((position, arg)) = iter.next() {
+        let bytes = arg.as_encoded_bytes();
+        if bytes == b"--" {
+            return args.len() - 2 - position;
+        }
+        if bytes.len() < 2 || bytes[0] != b'-' || bytes[1] == b'-' {
+            continue;
+        }
+        // A cluster of short options: the first one that takes a value uses
+        // the rest of the cluster, or the next argument.
+        let value_at = bytes[1..].iter().position(|b| WITH_VALUE.contains(b));
+        if value_at.is_some_and(|at| at + 2 == bytes.len()) {
+            iter.next();
+        }
+    }
+    0
+}
+
+/// Separates the operands that belong to the `-o` field list from the files.
+///
+/// Like GNU join, a field list may be written as several unquoted arguments,
+/// as in `join -o 1.1 1.2 2.2 FILE1 FILE2`. The operands that directly follow
+/// an `-o` value, with no other argument in between, can be fields. When there
+/// are more than two operands, the earliest of those are taken as fields,
+/// until two operands are left or none of them can be a field. Once more than
+/// two operands precede a later `-o`, the excess is taken before its value.
+///
+/// Returns the field list in order (empty without `-o`) and the remaining
+/// operands.
+fn split_operands(
+    matches: &clap::ArgMatches,
+    args: &[OsString],
+) -> (Vec<FieldList>, Vec<OsString>) {
+    let mut operands: Vec<(usize, OsString)> = Vec::new();
+    for id in ["file1", "file2", "extra"] {
+        if let (Some(indices), Some(values)) =
+            (matches.indices_of(id), matches.get_many::<OsString>(id))
+        {
+            operands.extend(indices.zip(values.cloned()));
+        }
+    }
+    operands.sort_by_key(|(index, _)| *index);
+
+    let options: Vec<(usize, &String)> = match (matches.indices_of("o"), matches.get_many("o")) {
+        (Some(indices), Some(values)) => indices.zip(values).collect(),
+        _ => Vec::new(),
+    };
+
+    // An operand can be a field when it and every argument before it, back
+    // to an `-o` value, are operands. Clap gives `--` no index, so what
+    // follows it is excluded separately.
+    let protected = operands.len() - count_after_separator(args).min(operands.len());
+    let mut can_be_field = vec![false; operands.len()];
+    for (value_index, value) in &options {
+        if *value == "auto" {
+            continue;
+        }
+        let mut expected = value_index + 1;
+        for (position, (index, _)) in operands.iter().enumerate().take(protected) {
+            if *index == expected {
+                can_be_field[position] = true;
+                expected += 1;
+            }
+        }
+    }
+
+    let mut taken = vec![false; operands.len()];
+    let mut fields = Vec::new();
+    let mut take_fields = |fields: &mut Vec<FieldList>, before: usize| {
+        let seen = operands.iter().filter(|(index, _)| *index < before).count();
+        let mut excess = seen.saturating_sub(2) - taken.iter().filter(|t| **t).count();
+        for (position, (index, operand)) in operands.iter().enumerate() {
+            if excess == 0 || *index >= before {
+                break;
+            }
+            if can_be_field[position] && !taken[position] {
+                taken[position] = true;
+                excess -= 1;
+                fields.push(FieldList {
+                    text: operand.to_string_lossy().into_owned(),
+                    from_option: false,
+                });
+            }
+        }
+    };
+    for (position, (value_index, value)) in options.iter().enumerate() {
+        if position > 0 {
+            take_fields(&mut fields, *value_index);
+        }
+        fields.push(FieldList {
+            text: (*value).clone(),
+            from_option: true,
+        });
+    }
+    if !options.is_empty() {
+        take_fields(&mut fields, usize::MAX);
+    }
+
+    let files = operands
+        .into_iter()
+        .zip(taken)
+        .filter_map(|((_, operand), taken)| (!taken).then_some(operand))
+        .collect();
+    (fields, files)
+}
+
 #[uucore::main]
 pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     // The command line is kept for the caret in `-o` diagnostics, which needs
     // the list as typed.
-    let (matches, diag_args) = uucore::clap_localization::handle_clap_result_with_diagnostics(
-        uu_app(),
-        args.collect(),
-        1,
-    )?;
+    let args: Vec<OsString> = args.collect();
+    let (matches, diag_args) =
+        uucore::clap_localization::handle_clap_result_with_diagnostics(uu_app(), args.clone(), 1)?;
 
     let mut opts = CollatorOptions::default();
     opts.alternate_handling = Some(AlternateHandling::Shifted);
     let _ = try_init_collator(opts);
 
-    let settings = parse_settings(&matches, diag_args.as_deref())?;
+    let (field_lists, operands) = split_operands(&matches, &args);
+    let settings = parse_settings(&matches, diag_args.as_deref(), &field_lists)?;
 
-    let file1 = matches.get_one::<OsString>("file1").unwrap();
-    let file2 = matches.get_one::<OsString>("file2").unwrap();
+    let (file1, file2) = match (operands.first(), operands.get(1)) {
+        (Some(file1), Some(file2)) => (file1, file2),
+        (Some(file1), None) => {
+            return Err(UUsageError::new(
+                1,
+                translate!("join-error-missing-operand-after", "file" => file1.quote()),
+            ));
+        }
+        _ => {
+            return Err(UUsageError::new(
+                1,
+                translate!("join-error-missing-operand"),
+            ));
+        }
+    };
+    if let Some(extra) = operands.get(2) {
+        return Err(UUsageError::new(
+            1,
+            translate!("join-error-extra-operand", "operand" => extra.quote()),
+        ));
+    }
 
     if file1 == "-" && file2 == "-" {
         return Err(USimpleError::new(
@@ -991,7 +1134,6 @@ pub fn uu_app() -> Command {
         )
         .arg(
             Arg::new("file1")
-                .required(true)
                 .value_name("FILE1")
                 .value_hint(clap::ValueHint::FilePath)
                 .value_parser(clap::value_parser!(OsString))
@@ -999,9 +1141,14 @@ pub fn uu_app() -> Command {
         )
         .arg(
             Arg::new("file2")
-                .required(true)
                 .value_name("FILE2")
                 .value_hint(clap::ValueHint::FilePath)
+                .value_parser(clap::value_parser!(OsString))
+                .hide(true),
+        )
+        .arg(
+            Arg::new("extra")
+                .num_args(0..)
                 .value_parser(clap::value_parser!(OsString))
                 .hide(true),
         )

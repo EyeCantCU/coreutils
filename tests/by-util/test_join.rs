@@ -833,3 +833,48 @@ fn test_hyphen_leading_field_number_is_reported_as_invalid() {
             .stderr_contains("invalid field number: '-1'");
     }
 }
+
+#[test]
+fn test_unquoted_field_list_operands() {
+    let ts = TestScenario::new(util_name!());
+    let at = &ts.fixtures;
+    at.write("l", "1 a x\n2 b y\n");
+    at.write("r", "1 d u\n2 e v\n");
+
+    // Operands right after the `-o` value continue its field list while
+    // there are more than two operands.
+    ts.ucmd()
+        .args(&["-o", "1.1", "1.2", "1.3", "2.2", "l", "r"])
+        .succeeds()
+        .stdout_only("1 a x d\n2 b y e\n");
+    ts.ucmd()
+        .args(&["-o", "1.1\t1.2", "1.3\t2.2", "l", "r"])
+        .succeeds()
+        .stdout_only("1 a x d\n2 b y e\n");
+    ts.ucmd()
+        .args(&["-o", "1.1", "1.2", "-o", "2.2", "2.3", "l", "r"])
+        .succeeds()
+        .stdout_only("1 d a u\n2 e b v\n");
+
+    // Only the excess is taken: the rest are files.
+    ts.ucmd()
+        .args(&["-o", "1.1", "1.2", "2.2", "l"])
+        .fails_with_code(1)
+        .stderr_only("join: 2.2: No such file or directory\n");
+    ts.ucmd()
+        .args(&["-o", "1.1", "3", "l", "r"])
+        .fails_with_code(1)
+        .stderr_only("join: invalid file number in field spec: '3'\n");
+
+    // Another argument in between, `--` or `auto` ends the list.
+    for args in [
+        &["-o", "1.1", "--", "1.2", "l", "r"][..],
+        &["-o", "1.1", "1.2", "-t", " ", "2.2", "l", "r"],
+        &["-o", "auto", "1.2", "l", "r"],
+    ] {
+        ts.ucmd()
+            .args(args)
+            .fails_with_code(1)
+            .stderr_contains("join: extra operand 'r'\n");
+    }
+}

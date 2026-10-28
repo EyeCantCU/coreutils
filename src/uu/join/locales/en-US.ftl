@@ -33,6 +33,9 @@ join-error-invalid-field-number = invalid field number: { $value }
 join-error-incompatible-fields = incompatible join fields { $field1 }, { $field2 }
 join-error-not-sorted = { $file }:{ $line_num }: is not sorted: { $content }
 join-error-input-not-sorted = input is not in sorted order
+join-error-missing-operand = missing operand
+join-error-missing-operand-after = missing operand after { $file }
+join-error-extra-operand = extra operand { $operand }
 
 # Diagnostics
 join-diag-help-format = an output field is FILENUM.FIELD, as in -o 1.2,2.1; 0 stands for the join field
