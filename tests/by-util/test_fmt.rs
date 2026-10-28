@@ -685,3 +685,60 @@ fn test_fmt_anti_prefix_keeps_missing_final_newline() {
             .stdout_only(expected);
     }
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // A stdin closed at startup is reported, not read as empty.
+    let scene = uutests::util::TestScenario::new(uutests::util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" fmt -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("fmt: read error: Bad file descriptor\n");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_stdin_read_error() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.mkdir("dir");
+    ucmd.set_stdin(std::fs::File::open(at.plus("dir")).unwrap())
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("fmt: read error: Is a directory\n");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_file_read_error() {
+    use std::process::Command;
+
+    // An EIO from read(2) on a directory operand is reported, not hidden by a directory check.
+    let ts = uutests::util::TestScenario::new(uutests::util_name!());
+    ts.fixtures.mkdir("d");
+    let path = ts.fixtures.plus_as_string("d");
+    let strace = |prog: &[&str]| {
+        Command::new("strace")
+            .args(["-f", "-o", "/dev/null", "-P", &path])
+            .args(["-e", "trace=read", "-e", "inject=read:error=EIO:when=1"])
+            .args(prog)
+            .output()
+    };
+
+    let probe = strace(&["cat", &path]);
+    if !probe.is_ok_and(|o| String::from_utf8_lossy(&o.stderr).contains("Input/output error")) {
+        eprintln!("TEST SKIPPED: strace read injection is not available");
+        return;
+    }
+
+    let bin = ts.bin_path.to_string_lossy().into_owned();
+    let out = strace(&[&bin, "fmt", &path]).expect("failed to spawn strace");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        format!("fmt: error reading '{path}': Input/output error\n")
+    );
+}

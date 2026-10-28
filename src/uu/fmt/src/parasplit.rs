@@ -5,7 +5,8 @@
 
 // spell-checker:ignore (ToDO) INFTY MULT PSKIP accum aftertab beforetab breakwords fmt's formatline linebreak linebreaking linebreaks linelen maxlength minlength nchars noformat noformatline ostream overlen parasplit plass pmatch poffset posn powf prefixindent punct signum slen sstart tabwidth tlen underlen winfo wlen wordlen wordsplits xanti xprefix
 
-use std::io::BufRead;
+use std::cell::Cell;
+use std::io::{self, BufRead};
 use std::iter::Peekable;
 use std::slice::Iter;
 
@@ -174,11 +175,21 @@ pub struct FileLine {
 pub struct FileLines<'a> {
     opts: &'a FmtOptions,
     reader: &'a mut FileOrStdReader,
+    /// Receives the read error that ended the input, if any.
+    error: &'a Cell<Option<io::Error>>,
 }
 
 impl FileLines<'_> {
-    fn new<'b>(opts: &'b FmtOptions, reader: &'b mut FileOrStdReader) -> FileLines<'b> {
-        FileLines { opts, reader }
+    fn new<'b>(
+        opts: &'b FmtOptions,
+        reader: &'b mut FileOrStdReader,
+        error: &'b Cell<Option<io::Error>>,
+    ) -> FileLines<'b> {
+        FileLines {
+            opts,
+            reader,
+            error,
+        }
     }
 
     /// returns true if this line should be formatted
@@ -264,6 +275,7 @@ impl Iterator for FileLines<'_> {
         let mut buf = Vec::new();
         self.reader
             .read_until(b'\n', &mut buf)
+            .map_err(|e| self.error.set(Some(e)))
             .ok()
             .filter(|n| *n > 0)?;
         let has_newline = buf.ends_with(b"\n");
@@ -374,8 +386,13 @@ pub struct ParagraphStream<'a> {
 }
 
 impl ParagraphStream<'_> {
-    pub fn new<'b>(opts: &'b FmtOptions, reader: &'b mut FileOrStdReader) -> ParagraphStream<'b> {
-        let lines = FileLines::new(opts, reader).peekable();
+    /// A read error ends the stream and is stored in `error`.
+    pub fn new<'b>(
+        opts: &'b FmtOptions,
+        reader: &'b mut FileOrStdReader,
+        error: &'b Cell<Option<io::Error>>,
+    ) -> ParagraphStream<'b> {
+        let lines = FileLines::new(opts, reader, error).peekable();
         // at the beginning of the file, we might find mail headers
         ParagraphStream {
             lines,
