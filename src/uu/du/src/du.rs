@@ -486,6 +486,8 @@ fn safe_du(
         // First get the lstat (without following symlinks) to check if it's a symlink
         let lstat = match dir_fd.stat_at(&entry_name, SymlinkBehavior::NoFollow) {
             Ok(stat) => stat,
+            // Removed after the directory was read: it takes no space, so skip it silently.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(e) => {
                 let entry_path = path.join(&entry_name);
                 print_tx.send(Err(e.map_err_context(
