@@ -141,7 +141,12 @@ fn tail_file(
         set_exit_code(1);
 
         header_printer.print_input(input)?;
-        let err_msg = translate!("tail-is-a-directory");
+        // Report what reading the directory really gives (normally EISDIR),
+        // so that other read errors are not hidden behind it.
+        let err_msg = match File::open(path).map(|mut dir| dir.read(&mut [0])) {
+            Ok(Err(e)) => uucore::error::strip_errno(&e),
+            _ => translate!("tail-is-a-directory"),
+        };
 
         show_error!(
             "{}",
