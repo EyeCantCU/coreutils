@@ -1929,6 +1929,68 @@ mod inter_partition_copying {
         );
     }
 
+    // A socket has no data to copy: across file systems it must be recreated,
+    // replacing an existing destination rather than leaving neither file.
+    #[test]
+    #[cfg_attr(wasi_runner, ignore = "WASI sandbox: /dev/shm not visible")]
+    pub(crate) fn test_mv_inter_partition_socket_replaces_dest() {
+        use std::os::unix::fs::FileTypeExt;
+        use std::os::unix::net::UnixListener;
+
+        let scene = TestScenario::new(util_name!());
+        let at = &scene.fixtures;
+        let _listener = UnixListener::bind(at.plus("sock")).expect("Unable to create socket");
+
+        let other_fs_tempdir =
+            TempDir::new_in("/dev/shm/").expect("Unable to create temp directory");
+        let dest = other_fs_tempdir.path().join("dest");
+        write(&dest, "dest contents").expect("Unable to write dest");
+
+        scene
+            .ucmd()
+            .arg("sock")
+            .arg(dest.to_str().unwrap())
+            .succeeds()
+            .no_output();
+
+        assert!(!at.plus("sock").exists());
+        assert!(
+            fs::symlink_metadata(&dest)
+                .expect("destination should exist")
+                .file_type()
+                .is_socket()
+        );
+    }
+
+    // Failing to create the special file at the destination names that file.
+    #[test]
+    #[cfg_attr(wasi_runner, ignore = "WASI sandbox: /dev/shm not visible")]
+    pub(crate) fn test_mv_inter_partition_fifo_create_error() {
+        let scene = TestScenario::new(util_name!());
+        let at = &scene.fixtures;
+        at.mkfifo("fifo");
+
+        let other_fs_tempdir =
+            TempDir::new_in("/dev/shm/").expect("Unable to create temp directory");
+        let ro_dir = other_fs_tempdir.path().join("ro");
+        fs::create_dir(&ro_dir).expect("Unable to create directory");
+        set_permissions(&ro_dir, PermissionsExt::from_mode(0o555))
+            .expect("Unable to set permissions");
+        let dest = ro_dir.join("fifo");
+
+        let result = scene.ucmd().arg("fifo").arg(&ro_dir).run();
+        set_permissions(&ro_dir, PermissionsExt::from_mode(0o755))
+            .expect("Unable to set permissions");
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        result.failure().stderr_only(format!(
+            "mv: cannot create fifo '{}': Permission denied\n",
+            dest.display()
+        ));
+        assert!(at.is_fifo("fifo"));
+    }
+
     // Ensure that the copying code used in an inter-partition move unlinks the destination symlink.
     #[test]
     #[cfg_attr(wasi_runner, ignore = "WASI sandbox: host paths not visible")]
