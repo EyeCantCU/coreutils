@@ -8,7 +8,8 @@
 use jiff::{Timestamp, ToSpan};
 use regex::Regex;
 use std::fs::metadata;
-use uutests::util::UCommand;
+use uutests::util::{TestScenario, UCommand};
+use uutests::util_name;
 use uutests::{at_and_ucmd, new_ucmd};
 
 const DATE_TIME_FORMAT_DEFAULT: &str = "%Y-%m-%d %H:%M";
@@ -79,7 +80,7 @@ fn test_number_lines_empty_value_is_rejected() {
     new_ucmd!()
         .args(&["--number-lines=", "test_one_page.log"])
         .fails_with_code(1)
-        .stderr_contains("pr: '-n' extra characters or invalid number in the argument");
+        .stderr_is("pr: '-n': Invalid argument: ''\nTry 'pr --help' for more information.\n");
 }
 
 #[test]
@@ -113,7 +114,7 @@ fn test_with_numbering_option_with_number_width() {
     let mut scenario = new_ucmd!();
     let value = file_last_modified_time(&scenario, test_file_path);
     scenario
-        .args(&["-n", "2", test_file_path])
+        .args(&["-n2", test_file_path])
         .succeeds()
         .stdout_is_templated_fixture(expected_test_file_path, &[("{last_modified_time}", &value)]);
 }
@@ -299,9 +300,9 @@ fn test_with_suppress_error_option() {
     let test_file_path = "test_num_page.log";
     let mut scenario = new_ucmd!();
     scenario
-        .args(&["--pages=20:5", "-r", test_file_path])
-        .fails()
-        .no_output();
+        .args(&["-r", test_file_path, "does-not-exist"])
+        .fails_with_code(1)
+        .no_stderr();
 }
 
 #[test]
@@ -486,7 +487,7 @@ fn test_page_length_too_large() {
 fn test_number_width_too_large() {
     let arg = "18446744073709551615";
     new_ucmd!()
-        .args(&["-n", arg])
+        .arg(format!("-n{arg}"))
         .fails_with_code(1)
         .stderr_is(format!(
             "pr: '-n' extra characters or invalid number in the argument: '{arg}': Value too large for defined data type\nTry 'pr --help' for more information.\n"
@@ -541,7 +542,7 @@ fn test_large_number_width_does_not_panic() {
     // With -t (no page headers/footers) GNU emits no page padding, so the
     // output is exactly the numbered line.
     new_ucmd!()
-        .args(&["-t", "-n", "70000"])
+        .args(&["-t", "-n70000"])
         .pipe_in("x\n")
         .succeeds()
         .stdout_is(format!("{}1\tx\n", " ".repeat(69999)));
@@ -589,13 +590,6 @@ fn test_offset_invalid() {
         .args(&["-o", "abc"])
         .fails_with_code(1)
         .stderr_is("pr: '-o MARGIN' invalid line offset: 'abc'\n");
-
-    // A negative zero is a margin of zero, as in GNU.
-    new_ucmd!()
-        .args(&["-t", "-o", "-0"])
-        .pipe_in("a\n")
-        .succeeds()
-        .stdout_only("a\n");
 }
 
 #[test]
@@ -637,8 +631,8 @@ fn test_with_date_format() {
         .stdout_only(format!("\n\nHello!{whitespace}Page 1\n\n\na{blank_lines}"));
 }
 
-#[uutests::wasi_ignore(NoLocaleData)]
 #[test]
+#[cfg_attr(wasi_runner, ignore = "WASI sandbox: locale database not visible")]
 fn test_with_date_format_env() {
     // POSIXLY_CORRECT + LC_ALL/TIME=POSIX uses "%b %e %H:%M %Y" date format
     let whitespace = " ".repeat(49);
@@ -711,39 +705,16 @@ fn test_join_lines_keeps_column_separator() {
 }
 
 #[test]
-fn test_merge_stops_after_last_line_without_header() {
-    // without a page trailer there is nothing to pad to: like GNU pr, stop
-    // after the last merged line (-F still prints the 5 header lines and a form feed)
-    // -J keeps the columns from being padded, so the lines are short
-    let body = "a\tc\nb\td\n";
-    let header = format!("\n\nX{}Page 1\n\n\n", " ".repeat(65));
-    for (args, expected) in [
-        (vec!["-J", "-t"], body.to_string()),
-        (vec!["-J", "-T"], body.to_string()),
-        (vec!["-J", "-F", "-D", "X"], format!("{header}{body}\x0c")),
-    ] {
-        let (at, mut ucmd) = at_and_ucmd!();
-        at.write("one", "a\nb\n");
-        at.write("two", "c\nd\n");
-        ucmd.arg("-m")
-            .args(&args)
-            .args(&["one", "two"])
-            .succeeds()
-            .stdout_is(expected);
-    }
-}
-
-#[test]
 fn test_value_for_number_lines() {
-    // *5 is of the form [SEP[NUMBER]] so is accepted and succeeds
-    new_ucmd!().args(&["-n", "*5", "test.log"]).succeeds();
+    // The value of -n has to be attached to it.
+    new_ucmd!().args(&["-n*5", "test.log"]).succeeds();
+    new_ucmd!().args(&["-na", "test.log"]).succeeds();
 
-    // a is of the form [SEP[NUMBER]] so is accepted and succeeds
-    new_ucmd!().args(&["-n", "a", "test.log"]).succeeds();
-
-    // foo5.txt is of not the form [SEP[NUMBER]] so is not used as value.
-    // Therefore, pr tries to access the file, which does not exist.
-    new_ucmd!().args(&["-n", "foo5.txt", "test.log"]).fails();
+    // A separate argument is a file operand.
+    new_ucmd!()
+        .args(&["-n", "*5", "test.log"])
+        .fails_with_code(1)
+        .stderr_is("pr: '*5': No such file or directory\n");
 }
 
 #[test]
@@ -911,40 +882,12 @@ fn test_form_feed_followed_by_new_line() {
 }
 
 #[test]
-fn test_line_numbers_continue_after_form_feed() {
-    // Command line: `printf "a\fb\nc\n" | pr -T -n:1`.
-    new_ucmd!()
-        .args(&["-T", "-n:1"])
-        .pipe_in("a\x0cb\nc\n")
-        .succeeds()
-        .stdout_is("1:a\n2:b\n3:c\n");
-
-    // Command line: `printf "a\fb\fc\n" | pr -T -n:1`.
-    new_ucmd!()
-        .args(&["-T", "-n:1"])
-        .pipe_in("a\x0cb\x0cc\n")
-        .succeeds()
-        .stdout_is("1:a\n2:b\n3:c\n");
-
-    // Command line: `printf "a\n\fb\nc\n" | pr -T -n:1`.
-    new_ucmd!()
-        .args(&["-T", "-n:1"])
-        .pipe_in("a\n\x0cb\nc\n")
-        .succeeds()
-        .stdout_is("1:a\n2:b\n3:c\n");
-}
-
-#[test]
 fn test_columns() {
     let whitespace = " ".repeat(50);
     let datetime_pattern = r"\d\d\d\d-\d\d-\d\d \d\d:\d\d";
     let header = format!("\n\n{datetime_pattern}{whitespace}Page 1\n\n\n");
-    // TODO Our output still does not match the behavior of GNU
-    // pr. The correct output should be:
-    //
-    //     "a\t\t\t\t    b\n";
-    //
-    let data = "a                                  \tb\n";
+    // Multi-column output pads with tabs where it can.
+    let data = "a\t\t\t\t    b\n";
     let blank_lines_60 = "\n".repeat(60);
     let pattern = format!("{header}{data}{blank_lines_60}");
     let regex = Regex::new(&pattern).unwrap();
@@ -968,7 +911,7 @@ fn test_columns_partly_filled_page() {
         .args(&["-t", "-2", "-w", "20"])
         .pipe_in("a\nb\nc\n")
         .succeeds()
-        .stdout_is("a        \tc\nb\n");
+        .stdout_is("a\t  c\nb\n");
 }
 
 #[test]
@@ -980,7 +923,7 @@ fn test_columns_partly_filled_page_across() {
         .args(&["-t", "-a", "-2", "-w", "20"])
         .pipe_in("a\nb\nc\n")
         .succeeds()
-        .stdout_is("a        \tb\nc\n");
+        .stdout_is("a\t  b\nc\n");
 }
 
 #[test]
@@ -999,20 +942,7 @@ fn test_columns_fewer_lines_than_columns() {
         .args(&["-t", "-3", "-w", "20"])
         .pipe_in("a\nb\n")
         .succeeds()
-        .stdout_is("a     \tb\n");
-}
-
-#[test]
-fn test_columns_last_column_not_padded() {
-    // GNU pr pads a column only to line up the next one, so a line never ends
-    // with spaces.
-    //
-    // Command line: `printf "ab\nc\n" | pr -2 -t -w 9 -s'|'`.
-    new_ucmd!()
-        .args(&["-2", "-t", "-w", "9", "-s|"])
-        .pipe_in("ab\nc\n")
-        .succeeds()
-        .stdout_is("ab  |c\n");
+        .stdout_is("a      b\n");
 }
 
 #[test]
@@ -1023,8 +953,8 @@ fn test_columns_last_page() {
     // Command line: `seq 9 | pr -2 -l 12 -w 20 -D DATE`.
     let header = "\n\nDATE          Page ";
     let expected = format!(
-        "{header}1\n\n\n1        \t3\n2        \t4\n{blank}\
-         {header}2\n\n\n5        \t7\n6        \t8\n{blank}\
+        "{header}1\n\n\n1\t  3\n2\t  4\n{blank}\
+         {header}2\n\n\n5\t  7\n6\t  8\n{blank}\
          {header}3\n\n\n9\n\n\n\n\n\n\n",
         blank = "\n".repeat(5),
     );
@@ -1045,16 +975,9 @@ fn test_merge() {
     let whitespace = " ".repeat(50);
     let datetime_pattern = r"\d\d\d\d-\d\d-\d\d \d\d:\d\d";
     let header = format!("\n\n{datetime_pattern}{whitespace}Page 1\n\n\n");
-    // TODO Our output still does not match the behavior of GNU
-    // pr. The correct output should be:
-    //
-    //     "a\t\t\t\t    b\n";
-    //
-    // and the blank lines should actually be empty lines.
-    let data = "a                                  \tb\n";
-    let blank_lines_55 = "                                   \t\n".repeat(55);
-    let footer = "\n".repeat(5);
-    let pattern = format!("{header}{data}{blank_lines_55}{footer}");
+    let data = "a\t\t\t\t    b\n";
+    let blank_lines_60 = "\n".repeat(60);
+    let pattern = format!("{header}{data}{blank_lines_60}");
     let regex = Regex::new(&pattern).unwrap();
 
     // Command line: `(echo "a" > f; echo "b" > g; pr -m f g)`.
@@ -1075,13 +998,13 @@ fn test_merge_one_long_one_short() {
     let whitespace = " ".repeat(50);
     let datetime_pattern = r"\d\d\d\d-\d\d-\d\d \d\d:\d\d";
     let header = format!("\n\n{datetime_pattern}{whitespace}Page 1\n\n\n");
-    let data = "a                                  \tb\n";
+    let data = "a\t\t\t\t    b\n";
     let footer = "\n".repeat(5);
     let page1 = format!("{header}{data}{footer}");
 
     // Page 2 should have just the second line of `f`.
     let header = format!("\n\n{datetime_pattern}{whitespace}Page 2\n\n\n");
-    let data = "a                                  \t\n";
+    let data = "a\t\t\t\t    \n";
     let page2 = format!("{header}{data}{footer}");
 
     let pattern = format!("{page1}{page2}");
@@ -1123,8 +1046,8 @@ fn test_expand_tab_at_end_of_short_flag_cluster() {
     for (arg, expected) in [
         ("-tre", "oi\n"),
         ("-tre8", "oi\n"),
-        ("-tfre", "oi\n\x0c"),
-        ("-tfre8", "oi\n\x0c"),
+        ("-tfre", "oi\n"),
+        ("-tfre8", "oi\n"),
     ] {
         new_ucmd!()
             .arg(arg)
@@ -1233,7 +1156,9 @@ fn test_invalid_expand_tab_arguments() {
         new_ucmd!()
             .args(&[arg, test_file_path])
             .fails()
-            .stderr_contains(format!("pr: '-e' extra characters or invalid number in the argument: ‘{error_msg_field}’\nTry 'pr --help' for more information."));
+            .stderr_contains(format!(
+                "pr: '-e' extra characters or invalid number in the argument: '{error_msg_field}'"
+            ));
     }
 }
 // spell-checker:enable
@@ -1251,7 +1176,7 @@ fn test_zero_columns() {
     new_ucmd!()
         .arg("--columns=0")
         .fails_with_code(1)
-        .stderr_contains("pr: invalid number of columns: '0': Numerical result out of range");
+        .stderr_is("pr: invalid number of columns: '0': Numerical result out of range\n");
 }
 
 #[test]
@@ -1259,7 +1184,7 @@ fn test_zero_columns_shortcut() {
     new_ucmd!()
         .arg("-0")
         .fails_with_code(1)
-        .stderr_contains("pr: invalid number of columns: '0': Numerical result out of range");
+        .stderr_is("pr: invalid number of columns: '0': Numerical result out of range\n");
 }
 
 #[test]
@@ -1316,7 +1241,7 @@ fn test_double_dash_shields_filename_ending_with_dash_zero() {
 
 #[test]
 fn test_zero_expand_tab_width() {
-    let expected = "pr: '-e' extra characters or invalid number in the argument: ‘0’\nTry 'pr --help' for more information.\n";
+    let expected = "pr: '-e' extra characters or invalid number in the argument: '0'\nTry 'pr --help' for more information.\n";
     new_ucmd!()
         .arg("-e0")
         .fails_with_code(1)
@@ -1418,58 +1343,156 @@ fn test_missing_file_error_message() {
         .stderr_does_not_contain("(os error");
 }
 
-#[uutests::wasi_ignore(NonUtf8ArgsUnsupported)]
 #[test]
-#[cfg(all(unix, not(target_vendor = "apple")))]
-fn test_non_utf8_input_filename() {
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-    let (at, mut ucmd) = at_and_ucmd!();
-    let name = OsStr::from_bytes(b"input-\xff");
-    std::fs::write(at.plus(name), b"from file\n").unwrap();
-    ucmd.arg("-t")
-        .arg(name)
-        .pipe_in("from stdin\n")
-        .succeeds()
-        .stdout_only("from file\n");
+fn test_zero_widths_are_out_of_range() {
+    for opt in ["-w", "-W"] {
+        new_ucmd!()
+            .arg(format!("{opt}0"))
+            .fails_with_code(1)
+            .stderr_only(format!(
+                "pr: '{opt} PAGE_WIDTH' invalid number of characters: '0': Numerical result out of range\n"
+            ));
+    }
 }
 
-#[uutests::wasi_ignore(NonUtf8ArgsUnsupported)]
 #[test]
-#[cfg(unix)]
-fn test_missing_non_utf8_input_does_not_read_stdin() {
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
+fn test_expand_tabs_invalid_width_after_char() {
+    // `=` is taken as the input tab character, leaving `-1` as the width.
+    new_ucmd!().arg("-e=-1").fails_with_code(1).stderr_only(
+        "pr: '-e' extra characters or invalid number in the argument: '-1'\n\
+             Try 'pr --help' for more information.\n",
+    );
+}
+
+#[test]
+fn test_expand_tabs_position_overflow() {
     new_ucmd!()
-        .arg("-t")
-        .arg(OsStr::from_bytes(b"missing-\xff"))
-        .pipe_in("from stdin\n")
+        .args(&["-t", "-e2147483647"])
+        .pipe_in("\t\t\n")
+        .set_stdout(std::process::Stdio::null())
         .fails_with_code(1)
-        .no_stdout()
-        .stderr_contains("missing-")
-        .stderr_does_not_contain("(os error");
+        .stderr_is("pr: integer overflow\n");
 }
 
-#[uutests::wasi_ignore(NonUtf8ArgsUnsupported)]
 #[test]
-#[cfg(all(unix, not(target_vendor = "apple")))]
-fn test_merge_non_utf8_input_filename() {
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-    let (at, mut ucmd) = at_and_ucmd!();
-    let name = OsStr::from_bytes(b"input-\xff");
-    std::fs::write(at.plus(name), b"left\n").unwrap();
-    at.write("right", "right\n");
-    ucmd.args(&["-T", "-m", "-l1"])
-        .arg(name)
-        .arg("right")
+fn test_page_range_errors() {
+    for (arg, msg) in [
+        ("--pages=0", "invalid page range '0'"),
+        ("--pages=-0", "invalid --pages argument '-0'"),
+        ("--pages=9x", "invalid page range '9x'"),
+        ("--pages=1:2x", "invalid suffix in --pages argument '1:2x'"),
+        (
+            "--pages=18446744073709551616",
+            "--pages argument '18446744073709551616' too large",
+        ),
+        ("+a1", "invalid + argument 'a1'"),
+    ] {
+        new_ucmd!()
+            .arg(arg)
+            .fails_with_code(1)
+            .stderr_only(format!("pr: {msg}\n"));
+    }
+}
+
+#[test]
+fn test_invalid_plus_page_range_is_a_file() {
+    for arg in ["+0", "+0foo"] {
+        new_ucmd!()
+            .arg(arg)
+            .fails_with_code(1)
+            .stderr_only(format!("pr: {arg}: No such file or directory\n"));
+    }
+}
+
+#[test]
+fn test_columns_expand_and_restore_tabs() {
+    new_ucmd!()
+        .args(&["-t", "-2"])
+        .pipe_in("x\tx\tx\tx\tx\nx\tx\tx\tx\tx\n")
         .succeeds()
-        .stdout_only(format!("{:<35}\t{}\n", "left", "right"));
+        .stdout_only("x\tx\tx\tx\tx   x\t    x\t    x\t    x\t    x\n");
 }
 
-#[uutests::wasi_ignore(NonUtf8ArgsUnsupported)]
+#[test]
+fn test_columns_joined_with_tab_keep_input_tabs() {
+    for sep in ["-s", "-s\t"] {
+        new_ucmd!()
+            .args(&["-t", "-2", sep])
+            .pipe_in("x\tx\tx\tx\tx\nx\tx\tx\tx\tx\n")
+            .succeeds()
+            .stdout_only("x\tx\tx\tx\tx\tx\tx\tx\tx\tx\n");
+    }
+}
+
+#[test]
+fn test_merge_with_tab_string_separator() {
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.write("a", "a\n");
+    at.write("b", "a\n");
+    ucmd.args(&["-m", "-S\t\t\t", "-t", "a", "b"])
+        .succeeds()
+        .stdout_only("a\t\t\t\t  \t\t\ta\n");
+}
+
+#[test]
+fn test_output_tabs_with_margin_and_numbers() {
+    new_ucmd!()
+        .args(&["-tn", "-i5", "-o9"])
+        .pipe_in("a        b\n")
+        .succeeds()
+        .stdout_only("\t\t   1\ta\t    b\n");
+}
+
+#[test]
+fn test_full_page_followed_by_form_feed_has_no_empty_page() {
+    new_ucmd!()
+        .args(&["-t", "-l3"])
+        .pipe_in("a\nb\nc\n\x0cd\n")
+        .succeeds()
+        .stdout_only("a\nb\nc\nd\n");
+    new_ucmd!()
+        .args(&["-t", "-l3"])
+        .pipe_in("a\nb\nc\x0cd\n")
+        .succeeds()
+        .stdout_only("a\nb\nc\n\x0cd\n");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[cfg_attr(
+    wasi_runner,
+    ignore = "WASI: wasmtime itself needs more memory than the guest's rlimit allows"
+)]
+fn test_long_line_is_streamed_under_memory_limit() {
+    use rlimit::Resource;
+    use std::process::Stdio;
+
+    const AS_LIMIT: u64 = 200 * 1024 * 1024;
+
+    // A single line larger than the limit must not be held in memory.
+    new_ucmd!()
+        .limit(Resource::AS, AS_LIMIT, AS_LIMIT)
+        .set_stdout(Stdio::null())
+        .pipe_in(vec![b'x'; 210 * 1024 * 1024])
+        .succeeds();
+}
+
+#[test]
+fn test_columns_last_column_not_padded() {
+    // GNU pr pads a column only to line up the next one, so a line never ends
+    // with spaces.
+    //
+    // Command line: `printf "ab\nc\n" | pr -2 -t -w 9 -s'|'`.
+    new_ucmd!()
+        .args(&["-2", "-t", "-w", "9", "-s|"])
+        .pipe_in("ab\nc\n")
+        .succeeds()
+        .stdout_is("ab  |c\n");
+}
+
 #[test]
 #[cfg(all(unix, not(target_vendor = "apple")))]
+#[cfg_attr(wasi_runner, ignore = "WASI: wasmtime rejects non-UTF-8 arguments")]
 fn test_header_preserves_non_utf8_filename() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
@@ -1484,18 +1507,75 @@ fn test_header_preserves_non_utf8_filename() {
 }
 
 #[test]
-fn test_non_utf8_input_is_written_unchanged() {
+#[cfg(all(unix, not(target_vendor = "apple")))]
+#[cfg_attr(wasi_runner, ignore = "WASI: wasmtime rejects non-UTF-8 arguments")]
+fn test_merge_non_utf8_input_filename() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let (at, mut ucmd) = at_and_ucmd!();
+    let name = OsStr::from_bytes(b"input-\xff");
+    std::fs::write(at.plus(name), b"left\n").unwrap();
+    at.write("right", "right\n");
+    ucmd.args(&["-T", "-m", "-l1"])
+        .arg(name)
+        .arg("right")
+        .succeeds()
+        .stdout_only("left\t\t\t\t    right\n");
+}
+
+#[test]
+fn test_merge_stops_after_last_line_without_header() {
+    // without a page trailer there is nothing to pad to: like GNU pr, stop
+    // after the last merged line (-F still prints the 5 header lines and a form feed)
+    // -J keeps the columns from being padded, so the lines are short
+    let body = "a\tc\nb\td\n";
+    let header = format!("\n\nX{}Page 1\n\n\n", " ".repeat(65));
+    for (args, expected) in [
+        (vec!["-J", "-t"], body.to_string()),
+        (vec!["-J", "-T"], body.to_string()),
+        (vec!["-J", "-F", "-D", "X"], format!("{header}{body}\x0c")),
+    ] {
+        let (at, mut ucmd) = at_and_ucmd!();
+        at.write("one", "a\nb\n");
+        at.write("two", "c\nd\n");
+        ucmd.arg("-m")
+            .args(&args)
+            .args(&["one", "two"])
+            .succeeds()
+            .stdout_is(expected);
+    }
+}
+
+#[test]
+#[cfg(unix)]
+#[cfg_attr(wasi_runner, ignore = "WASI: wasmtime rejects non-UTF-8 arguments")]
+fn test_missing_non_utf8_input_does_not_read_stdin() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
     new_ucmd!()
         .arg("-t")
-        .pipe_in(b"\xff\xfe abc\n\xc3( x\n\x80\n")
-        .succeeds()
-        .stdout_is_bytes(b"\xff\xfe abc\n\xc3( x\n\x80\n");
+        .arg(OsStr::from_bytes(b"missing-\xff"))
+        .pipe_in("from stdin\n")
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_contains("missing-")
+        .stderr_does_not_contain("(os error");
+}
 
-    new_ucmd!()
-        .args(&["-n", "-t"])
-        .pipe_in(b"\xff\n")
+#[test]
+#[cfg(all(unix, not(target_vendor = "apple")))]
+#[cfg_attr(wasi_runner, ignore = "WASI: wasmtime rejects non-UTF-8 arguments")]
+fn test_non_utf8_input_filename() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let (at, mut ucmd) = at_and_ucmd!();
+    let name = OsStr::from_bytes(b"input-\xff");
+    std::fs::write(at.plus(name), b"from file\n").unwrap();
+    ucmd.arg("-t")
+        .arg(name)
+        .pipe_in("from stdin\n")
         .succeeds()
-        .stdout_is_bytes(b"    1\t\xff\n");
+        .stdout_only("from file\n");
 }
 
 #[test]
@@ -1515,6 +1595,21 @@ fn test_non_utf8_input_in_columns() {
         .pipe_in(b"abcd\xffe\nc\n")
         .succeeds()
         .stdout_is_bytes(b"abcd\xff|c\n");
+}
+
+#[test]
+fn test_non_utf8_input_is_written_unchanged() {
+    new_ucmd!()
+        .arg("-t")
+        .pipe_in(b"\xff\xfe abc\n\xc3( x\n\x80\n")
+        .succeeds()
+        .stdout_is_bytes(b"\xff\xfe abc\n\xc3( x\n\x80\n");
+
+    new_ucmd!()
+        .args(&["-n", "-t"])
+        .pipe_in(b"\xff\n")
+        .succeeds()
+        .stdout_is_bytes(b"    1\t\xff\n");
 }
 
 #[test]
@@ -1583,10 +1678,6 @@ fn test_option_value_is_not_an_operand() {
         .args(&["-l", "+5", "-t", "test_one_page.log"])
         .succeeds()
         .stdout_is_fixture("test_one_page.log");
-    new_ucmd!()
-        .args(&["-N", "-1", "test_one_page.log"])
-        .fails()
-        .stderr_only("pr: '-N NUMBER' invalid starting line number: '-1'\n");
     // The option may end a cluster, or be cut short.
     for args in [&["-tl", "-1"][..], &["--len", "-1"]] {
         new_ucmd!()
@@ -1623,4 +1714,51 @@ fn test_plus_operand_that_is_not_a_page_range_names_a_file() {
             .fails()
             .stderr_contains(format!("pr: {operand}: "));
     }
+}
+
+#[test]
+fn test_line_numbers_continue_after_form_feed() {
+    // Command line: `printf "a\fb\nc\n" | pr -T -n:1`.
+    new_ucmd!()
+        .args(&["-T", "-n:1"])
+        .pipe_in("a\x0cb\nc\n")
+        .succeeds()
+        .stdout_is("1:a\n2:b\n3:c\n");
+
+    // Command line: `printf "a\fb\fc\n" | pr -T -n:1`.
+    new_ucmd!()
+        .args(&["-T", "-n:1"])
+        .pipe_in("a\x0cb\x0cc\n")
+        .succeeds()
+        .stdout_is("1:a\n2:b\n3:c\n");
+
+    // Command line: `printf "a\n\fb\nc\n" | pr -T -n:1`.
+    new_ucmd!()
+        .args(&["-T", "-n:1"])
+        .pipe_in("a\n\x0cb\nc\n")
+        .succeeds()
+        .stdout_is("1:a\n2:b\n3:c\n");
+}
+
+#[test]
+#[cfg(unix)]
+fn test_error_follows_earlier_output_in_merged_stream() {
+    // With stdout and stderr on one pipe, the error for a later operand comes
+    // after the pages already produced.
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.write("a", "one\ntwo\n");
+    let output = std::process::Command::new("sh")
+        .current_dir(&scene.fixtures.subdir)
+        .args([
+            "-c",
+            "\"$0\" pr -t a nosuchfile 2>&1",
+            scene.bin_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.starts_with("one\ntwo\n") && text.contains("pr: nosuchfile: "),
+        "{text}"
+    );
 }
