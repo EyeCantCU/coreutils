@@ -103,6 +103,8 @@ enum DateError {
     MultipleOutputFormats,
     #[error("{}", translate!("date-error-expected-file-got-directory", "path" => .path))]
     ExpectedFileGotDirectory { path: String },
+    #[error("{}", translate!("date-error-read", "path" => .path, "error" => .error))]
+    Read { path: String, error: String },
     #[error("{}", translate!("date-error-cannot-set-date", "path" => .path, "error" => .error))]
     CannotSetDate { path: String, error: String },
     #[error("{}", translate!("date-error-invalid-format", "format" => .format, "error" => .error))]
@@ -568,17 +570,38 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             Box::new(iter)
         }
         DateSource::Stdin => {
-            parse_dates_from_reader(std::io::stdin(), &now, DebugOptions::new(&settings))
+            let name = translate!("date-standard-input");
+            #[cfg(all(unix, not(target_os = "fuchsia")))]
+            if let Err(e) = uucore::signals::ensure_stdin_open() {
+                return Err(DateError::Read {
+                    path: name.maybe_quote().to_string(),
+                    error: strip_errno(&e),
+                }
+                .into());
+            }
+            parse_dates_from_reader(
+                std::io::stdin(),
+                name.into(),
+                &now,
+                DebugOptions::new(&settings),
+            )
         }
         DateSource::File(ref path) => {
-            if path.is_dir() {
+            // Reading a directory fails with EISDIR on Linux, so let the read
+            // report it (or any other read error) there.
+            if cfg!(not(any(target_os = "linux", target_os = "android"))) && path.is_dir() {
                 return Err(Box::new(DateError::ExpectedFileGotDirectory {
                     path: path.quote().to_string(),
                 }));
             }
             let file =
                 File::open(path).map_err_context(|| path.as_os_str().maybe_quote().to_string())?;
-            parse_dates_from_reader(file, &now, DebugOptions::new(&settings))
+            parse_dates_from_reader(
+                file,
+                path.clone().into_os_string(),
+                &now,
+                DebugOptions::new(&settings),
+            )
         }
         DateSource::FileMtime(ref path) => {
             let metadata = std::fs::metadata(path)
@@ -1613,13 +1636,24 @@ fn try_parse_with_abbreviation<S: AsRef<str>>(date_str: S, now: &Zoned) -> Optio
 /// Returns a boxed iterator over the parse results.
 fn parse_dates_from_reader<R: Read + 'static>(
     reader: R,
+    name: OsString,
     now: &Zoned,
     debug: DebugOptions,
 ) -> Box<
     dyn Iterator<Item = Result<ParsedDateTime, (String, parse_datetime::ParseDateTimeError)>> + '_,
 > {
     let lines = BufReader::new(reader).split(b'\n');
-    Box::new(lines.map_while(Result::ok).map(move |mut bytes| {
+    // A read error ends the input; report it rather than stopping silently.
+    let lines = lines.map_while(move |line| {
+        line.map_err(|e| {
+            show!(DateError::Read {
+                path: name.maybe_quote().to_string(),
+                error: strip_errno(&e),
+            });
+        })
+        .ok()
+    });
+    Box::new(lines.map(move |mut bytes| {
         // GNU handles each line as a C string, so a NUL byte ends it
         if let Some(nul) = bytes.iter().position(|&b| b == 0) {
             bytes.truncate(nul);
