@@ -130,9 +130,10 @@ pub use nix::sys::stat::FileStat;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 const READ_DIR_BUF_SIZE: usize = 8192;
 
-// Helper function to read directory entries using rustix.
+// Helper function to read directory entries using rustix. Entries read
+// before a failure are returned along with the error.
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn read_dir_entries(fd: impl AsFd) -> io::Result<Vec<OsString>> {
+fn read_dir_entries_partial(fd: impl AsFd) -> (Vec<OsString>, io::Result<()>) {
     let mut buffer = [MaybeUninit::<u8>::uninit(); READ_DIR_BUF_SIZE];
     let mut dir = RawDir::new(fd.as_fd(), &mut buffer);
     let mut entries = Vec::new();
@@ -145,29 +146,33 @@ fn read_dir_entries(fd: impl AsFd) -> io::Result<Vec<OsString>> {
                     entries.push(name.to_os_string());
                 }
             }
-            Some(Err(e)) => break Err(e),
+            Some(Err(e)) => break Err(e.into()),
             None => break Ok(()),
         }
     };
 
     // Rewind directory position.
     let rewind = rustix::fs::seek(fd, rustix::fs::SeekFrom::Start(0));
-    result?;
-    rewind?;
-    Ok(entries)
+    let result = result.and(rewind.map(drop).map_err(Into::into));
+    (entries, result)
 }
 
-// Helper function to read directory entries using nix.
+// Helper function to read directory entries using nix. Entries read before a
+// failure are returned along with the error.
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
-fn read_dir_entries(fd: impl AsFd) -> io::Result<Vec<OsString>> {
+fn read_dir_entries_partial(fd: impl AsFd) -> (Vec<OsString>, io::Result<()>) {
     let mut entries = Vec::new();
 
     // Duplicate the fd for Dir (it takes ownership)
-    let dup_fd =
-        nix::unistd::dup(fd.as_fd()).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
-    let mut dir = Dir::from_fd(dup_fd).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+    let mut dir = match nix::unistd::dup(fd.as_fd()).and_then(Dir::from_fd) {
+        Ok(dir) => dir,
+        Err(e) => return (entries, Err(io::Error::from_raw_os_error(e as i32))),
+    };
     for entry_result in dir.iter() {
-        let entry = entry_result.map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+        let entry = match entry_result {
+            Ok(entry) => entry,
+            Err(e) => return (entries, Err(io::Error::from_raw_os_error(e as i32))),
+        };
         let name = entry.file_name();
         let name_os = OsStr::from_bytes(name.to_bytes());
         if name_os != "." && name_os != ".." {
@@ -175,7 +180,12 @@ fn read_dir_entries(fd: impl AsFd) -> io::Result<Vec<OsString>> {
         }
     }
 
-    Ok(entries)
+    (entries, Ok(()))
+}
+
+fn read_dir_entries(fd: impl AsFd) -> io::Result<Vec<OsString>> {
+    let (entries, result) = read_dir_entries_partial(fd);
+    result.map(|()| entries)
 }
 
 fn fstatat_fd(
@@ -363,6 +373,12 @@ impl DirFd {
             source: e,
         })?;
         Ok(stat)
+    }
+
+    /// Read directory entries, keeping those read before a failure: the
+    /// returned error, if any, is the raw one from reading the directory.
+    pub fn read_dir_partial(&self) -> (Vec<OsString>, io::Result<()>) {
+        read_dir_entries_partial(&self.fd)
     }
 
     /// Read directory entries

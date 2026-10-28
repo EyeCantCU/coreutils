@@ -363,7 +363,41 @@ pub fn safe_remove_dir_recursive(
         }
     }
 
-    let error = safe_remove_dir_recursive_impl(path, dir_fd, options, root_dev, root_ino);
+    let (entries, read_result) = dir_fd.read_dir_partial();
+    let traversal_error = match read_result {
+        Ok(()) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            if !options.force {
+                return show_permission_denied_error(path);
+            }
+            None
+        }
+        Err(e) if entries.is_empty() => {
+            // Nothing could be listed: try removing the directory as if it
+            // were empty, and if it is not, blame the failed read.
+            if options.interactive == InteractiveMode::Always
+                && !prompt_dir_with_mode(path, initial_mode as libc::mode_t, options)
+            {
+                return false;
+            }
+            return match fs::remove_dir(path) {
+                Ok(()) => {
+                    report_verbose_write_error(verbose_removed_directory(path, options));
+                    false
+                }
+                Err(_) => show_removal_error(e, path),
+            };
+        }
+        Err(e) => Some(e),
+    };
+
+    let error = safe_remove_dir_recursive_impl(path, dir_fd, entries, options, root_dev, root_ino);
+
+    // The listing broke off partway: what was read has been removed, but the
+    // directory itself may still hold entries that were never seen.
+    if let Some(e) = traversal_error {
+        return show_traversal_error(e, path);
+    }
 
     // After processing all children, remove the directory itself
     if error {
@@ -410,6 +444,7 @@ struct Frame {
     ino: u64,
     entries: std::vec::IntoIter<OsString>,
     error: bool,
+    read_error: Option<ReadError>,
     /// The entry being emptied, removed once that is done.
     entry_name: OsString,
     entry_mode: libc::mode_t,
@@ -419,6 +454,22 @@ struct Frame {
 
 #[cfg(not(target_os = "redox"))]
 const OPEN_DIR_FDS: usize = 16;
+
+/// A failure to read a directory's entries, and whether any had been read
+/// before it.
+#[cfg(not(target_os = "redox"))]
+struct ReadError {
+    error: std::io::Error,
+    partial: bool,
+}
+
+/// Report a directory whose listing failed partway through.
+fn show_traversal_error(error: std::io::Error, path: &Path) -> bool {
+    let e = error
+        .map_err_context(|| translate!("rm-error-traversal-failed", "file" => path.maybe_quote()));
+    show_error!("{e}");
+    true
+}
 
 /// The path of the directory being walked, kept as raw bytes so that stepping
 /// into an entry and back out again is a truncation rather than a fresh
@@ -467,25 +518,14 @@ fn reopen_parent(child_fd: &DirFd, dev: u64, ino: u64) -> std::io::Result<DirFd>
 pub fn safe_remove_dir_recursive_impl(
     path: &Path,
     mut cur_fd: DirFd,
+    entries: Vec<OsString>,
     options: &Options,
     root_dev: u64,
     root_ino: u64,
 ) -> bool {
-    // Read directory entries using safe traversal
-    let entries = match cur_fd.read_dir() {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            if !options.force {
-                show_permission_denied_error(path);
-            }
-            return !options.force;
-        }
-        Err(e) => {
-            return handle_error_with_force(e, path, options);
-        }
-    };
-
     let mut error = false;
+    // How reading the directory being walked failed, if it did.
+    let mut read_error: Option<ReadError> = None;
     let mut entries = entries.into_iter();
     let mut path_buf = path.as_os_str().as_bytes().to_vec();
     // Entries of the root directory have the root itself as their parent.
@@ -514,12 +554,42 @@ pub fn safe_remove_dir_recursive_impl(
                 }
             };
             let child_error = error;
+            let child_read_error = std::mem::replace(&mut read_error, parent.read_error);
+            let child_listed = child_read_error.is_none();
             (parent_dev, ino, entries) = (parent.dev, parent.ino, parent.entries);
             error = parent.error | child_error;
+
+            match child_read_error {
+                // Entries may remain that were never listed: leave it be.
+                Some(ReadError {
+                    error: e,
+                    partial: true,
+                }) => {
+                    error |= show_traversal_error(e, path_of(&path_buf));
+                }
+                // Nothing was listed: remove it if it is in fact empty,
+                // and otherwise blame the failed read.
+                Some(ReadError {
+                    error: e,
+                    partial: false,
+                }) if options.interactive != InteractiveMode::Always
+                    || prompt_dir_with_mode(path_of(&path_buf), parent.entry_mode, options) =>
+                {
+                    match cur_fd.unlink_at(&parent.entry_name, true) {
+                        Ok(()) => report_verbose_write_error(verbose_removed_directory(
+                            path_of(&path_buf),
+                            options,
+                        )),
+                        Err(_) => error |= show_removal_error(e, path_of(&path_buf)),
+                    }
+                }
+                Some(_) | None => {}
+            }
 
             // Ask user permission if needed for this subdirectory, then remove
             // the now-empty subdirectory using safe unlinkat.
             if !child_error
+                && child_listed
                 && (options.interactive != InteractiveMode::Always
                     || prompt_dir_with_mode(path_of(&path_buf), parent.entry_mode, options))
             {
@@ -616,18 +686,19 @@ pub fn safe_remove_dir_recursive_impl(
                 }
             };
 
-            let child_entries = match child_dir_fd.read_dir() {
-                Ok(child_entries) => (child_entries.into_iter(), false),
+            let (child_entries, child_read) = child_dir_fd.read_dir_partial();
+            let (child_entries, child_error, child_read_error) = match child_read {
+                Ok(()) => (child_entries, false, None),
                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                     if !options.force {
                         show_permission_denied_error(path_of(&path_buf));
                     }
-                    (Vec::new().into_iter(), !options.force)
+                    (Vec::new(), !options.force, None)
                 }
-                Err(e) => (
-                    Vec::new().into_iter(),
-                    handle_error_with_force(e, path_of(&path_buf), options),
-                ),
+                Err(e) => {
+                    let partial = !child_entries.is_empty();
+                    (child_entries, false, Some(ReadError { error: e, partial }))
+                }
             };
 
             // Suspend this directory and empty the subdirectory first.
@@ -635,8 +706,9 @@ pub fn safe_remove_dir_recursive_impl(
                 dir_fd: Some(std::mem::replace(&mut cur_fd, child_dir_fd)),
                 dev: parent_dev,
                 ino,
-                entries: std::mem::replace(&mut entries, child_entries.0),
-                error: std::mem::replace(&mut error, child_entries.1),
+                entries: std::mem::replace(&mut entries, child_entries.into_iter()),
+                error: std::mem::replace(&mut error, child_error),
+                read_error: std::mem::replace(&mut read_error, child_read_error),
                 entry_name,
                 entry_mode: entry_stat.st_mode as libc::mode_t,
                 path_len: parent_len,
@@ -658,6 +730,7 @@ pub fn safe_remove_dir_recursive_impl(
 pub fn safe_remove_dir_recursive_impl(
     _path: &Path,
     _dir_fd: DirFd,
+    _entries: Vec<OsString>,
     _options: &Options,
     _root_dev: u64,
     _root_ino: u64,
