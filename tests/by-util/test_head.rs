@@ -1247,3 +1247,109 @@ fn test_header_quotes_name_with_control_char() {
         .succeeds()
         .stdout_only("==> 'tab'$'\\t''here' <==\nt\n");
 }
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin() {
+    // A stdin closed at startup is reported, not read as empty.
+    let scene = TestScenario::new(util_name!());
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" head -n1 -"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .no_stdout()
+        .stderr_is("head: error reading 'standard input': Bad file descriptor\n");
+}
+
+#[test]
+#[cfg(all(target_os = "linux", not(wasi_runner)))]
+fn test_read_error_is_not_a_write_error() {
+    // A read error is reported and the next file is still processed.
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.write("file", "a\n");
+    for mode in ["-c1", "-n1", "-c-1", "-n-1"] {
+        scene
+            .ucmd()
+            .args(&["-q", mode, "/proc/self/mem", "file"])
+            .fails_with_code(1)
+            .stderr_is("head: error reading '/proc/self/mem': Input/output error\n");
+    }
+}
+
+#[test]
+#[cfg(all(unix, not(wasi_runner)))]
+fn test_closed_stdin_continues_with_next_file() {
+    // The closed stdin is an error for that input only; the next file is still read.
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.write("f.txt", "data\n");
+    scene
+        .cmd("sh")
+        .args(&["-c", "exec <&-; \"$0\" head - f.txt"])
+        .arg(&scene.bin_path)
+        .fails_with_code(1)
+        .stdout_is("==> 'standard input' <==\n\n==> f.txt <==\ndata\n")
+        .stderr_is("head: error reading 'standard input': Bad file descriptor\n");
+}
+
+#[test]
+#[cfg(all(target_os = "linux", not(wasi_runner)))]
+fn test_read_error_keeps_seekable_stdin_offset() {
+    use std::io::{Seek, SeekFrom};
+    use std::process::{Command, Stdio};
+
+    // Another process's memory is seekable; reading it fails after the last
+    // mapped byte before an unmapped gap. Skip if it can't be opened.
+    let mut child = Command::new("sleep")
+        .arg("30")
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let maps = std::fs::read_to_string(format!("/proc/{pid}/maps")).unwrap_or_default();
+    let mut ranges: Vec<(u64, u64, bool)> = maps
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let (a, b) = it.next()?.split_once('-')?;
+            let readable = it.next()?.starts_with('r');
+            Some((
+                u64::from_str_radix(a, 16).ok()?,
+                u64::from_str_radix(b, 16).ok()?,
+                readable,
+            ))
+        })
+        .collect();
+    ranges.sort_unstable();
+    let gap_start = ranges
+        .windows(2)
+        .find(|w| w[0].2 && w[0].1 - w[0].0 >= 8192 && w[0].1 < w[1].0)
+        .map(|w| w[0].1);
+    let mem = std::fs::File::open(format!("/proc/{pid}/mem"));
+    let (Some(end), Ok(mut mem)) = (gap_start, mem) else {
+        child.kill().unwrap();
+        child.wait().unwrap();
+        return;
+    };
+    let start = end - 4096;
+    if mem.seek(SeekFrom::Start(start)).is_err() {
+        child.kill().unwrap();
+        child.wait().unwrap();
+        return;
+    }
+    let shadow = mem.try_clone().unwrap();
+
+    let result = new_ucmd!()
+        .args(&["-c", "1000000", "-"])
+        .set_stdin(mem)
+        .run();
+    let mut shadow = shadow;
+    let offset = shadow.stream_position().unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+
+    result
+        .failure()
+        .stderr_contains("error reading 'standard input'");
+    assert_eq!(offset, end, "offset must stay where the read stopped");
+}
