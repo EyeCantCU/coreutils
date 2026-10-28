@@ -299,6 +299,44 @@ fn test_du_env_block_size_hierarchy() {
 }
 
 #[test]
+fn test_du_block_size_unit_and_apostrophe() {
+    let ts = TestScenario::new(util_name!());
+    let at = &ts.fixtures;
+    std::fs::File::create(at.plus("1mb"))
+        .expect("cannot create test file")
+        .set_len(1_000_000)
+        .expect("cannot set file size");
+
+    // A unit with no number is printed after each size; a leading
+    // apostrophe is accepted.
+    let cases = [
+        ("KiB", "977KiB\t1mb\n"),
+        ("k", "977K\t1mb\n"),
+        ("'k", "977K\t1mb\n"),
+        ("KB", "1000kB\t1mb\n"),
+        ("'m", "1M\t1mb\n"),
+        ("1k", "977\t1mb\n"),
+        ("'1M", "1\t1mb\n"),
+    ];
+    for (block_size, expected) in cases {
+        ts.ucmd()
+            .args(&["-A", &format!("--block-size={block_size}"), "1mb"])
+            .succeeds()
+            .stdout_is(expected);
+        ts.ucmd()
+            .args(&["-A", "1mb"])
+            .env("BLOCK_SIZE", block_size)
+            .succeeds()
+            .stdout_is(expected);
+    }
+
+    ts.ucmd()
+        .args(&["-A", "--block-size='", "1mb"])
+        .fails_with_code(1)
+        .stderr_contains("invalid --block-size argument");
+}
+
+#[test]
 fn test_du_binary_block_size() {
     let ts = TestScenario::new(util_name!());
     let at = &ts.fixtures;
