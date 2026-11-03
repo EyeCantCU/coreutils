@@ -23,16 +23,146 @@ use uucore::error::{FromIo, UResult, USimpleError, UUsageError};
 use uucore::format_usage;
 use uucore::translate;
 
-/// GNU's regex engine treats a trailing lone backslash as a literal backslash,
-/// while the `regex` crate rejects it as an incomplete escape sequence. Double
-/// it so that such patterns keep working instead of erroring out.
-fn escape_trailing_backslash(pattern: &str) -> String {
-    let trailing = pattern.chars().rev().take_while(|&c| c == '\\').count();
-    if trailing % 2 == 1 {
-        format!("{pattern}\\")
-    } else {
-        pattern.to_owned()
+/// Translate a `-S`/`-W` pattern from the syntax GNU ptx accepts to the `regex` crate's.
+/// Returns `None` for what GNU rejects outright: an unterminated bracket expression,
+/// unbalanced `\(` and `\)`, or a back-reference to a group that is not complete.
+/// The `regex` crate can still fail on valid GNU syntax it lacks (back-references,
+/// reversed ranges); callers decide what to do then.
+fn translate_regex(pattern: &str) -> Option<String> {
+    let mut out = String::with_capacity(pattern.len() * 2);
+    let mut chars = pattern.chars().peekable();
+    // Whether a repetition operator here would have nothing to repeat.
+    let mut at_start = true;
+    // The run of repetition operators just emitted, merged into one.
+    let mut last_op: Option<char> = None;
+    let (mut open_groups, mut closed_groups) = (0usize, 0usize);
+    while let Some(c) = chars.next() {
+        if matches!(c, '*' | '+' | '?') && !at_start {
+            let op = match last_op {
+                None => c,
+                Some(prev) if prev == c => c,
+                Some(_) => '*',
+            };
+            if last_op.is_some() {
+                out.pop();
+            }
+            out.push(op);
+            last_op = Some(op);
+            continue;
+        }
+        last_op = None;
+        let next_at_start = match c {
+            '\\' => match chars.next() {
+                Some('(') => {
+                    open_groups += 1;
+                    out.push('(');
+                    true
+                }
+                Some('|') => {
+                    out.push('|');
+                    true
+                }
+                Some(')') => {
+                    if open_groups == 0 {
+                        return None;
+                    }
+                    open_groups -= 1;
+                    closed_groups += 1;
+                    out.push(')');
+                    false
+                }
+                Some('`') => {
+                    out.push_str("\\A");
+                    at_start
+                }
+                Some('\'') => {
+                    out.push_str("\\z");
+                    false
+                }
+                Some(e @ ('w' | 'W' | 's' | 'S' | 'b' | 'B' | '<' | '>')) => {
+                    out.push('\\');
+                    out.push(e);
+                    matches!(e, 'b' | 'B' | '<' | '>') && at_start
+                }
+                Some(e @ ('n' | 't' | 'r' | 'f' | 'v' | 'a' | 'x' | '1'..='9')) => {
+                    // C escapes keep their meaning; back-references are left
+                    // for the `regex` crate to reject.
+                    if e.to_digit(10).is_some_and(|n| n as usize > closed_groups) {
+                        return None;
+                    }
+                    out.push('\\');
+                    out.push(e);
+                    false
+                }
+                Some(e) => {
+                    out.push_str(&regex::escape(&e.to_string()));
+                    false
+                }
+                // A trailing lone backslash is dropped.
+                None => at_start,
+            },
+            '^' if at_start => {
+                out.push('^');
+                true
+            }
+            '$' if chars.peek().is_none()
+                || chars.clone().take(2).eq(['\\', ')'])
+                || chars.clone().take(2).eq(['\\', '|']) =>
+            {
+                out.push('$');
+                false
+            }
+            '.' => {
+                out.push('.');
+                false
+            }
+            '[' => {
+                out.push('[');
+                if chars.peek() == Some(&'^') {
+                    chars.next();
+                    out.push('^');
+                }
+                // A `]` right after the opening is a member.
+                if chars.peek() == Some(&']') {
+                    chars.next();
+                    out.push_str("\\]");
+                }
+                loop {
+                    match chars.next()? {
+                        ']' => break,
+                        '-' => out.push('-'),
+                        m @ ('\\' | '[' | '&' | '~' | '^') => {
+                            out.push('\\');
+                            out.push(m);
+                        }
+                        m => out.push(m),
+                    }
+                }
+                out.push(']');
+                false
+            }
+            other => {
+                out.push_str(&regex::escape(&other.to_string()));
+                false
+            }
+        };
+        at_start = next_at_start;
     }
+    (open_groups == 0).then_some(out)
+}
+
+/// Compile `pattern`, reporting a syntax error with the regexp as the user wrote it (`original`).
+fn compile_regex(pattern: Option<&str>, original: &str) -> UResult<Regex> {
+    pattern
+        .and_then(|p| Regex::new(p).ok())
+        .ok_or_else(|| invalid_regexp(original))
+}
+
+fn invalid_regexp(original: &str) -> Box<dyn uucore::error::UError> {
+    USimpleError::new(
+        1,
+        translate!("ptx-error-invalid-regexp", "regexp" => original.quote()),
+    )
 }
 
 #[derive(Debug, PartialEq)]
@@ -162,7 +292,12 @@ impl WordFilter {
             matches
                 .get_one::<String>(options::WORD_REGEXP)
                 .filter(|v| !v.is_empty())
-                .map(|v| escape_trailing_backslash(v))
+                .map(|v| -> UResult<String> {
+                    // Valid patterns the regex crate can't compile are ignored
+                    // when the words are found, as before.
+                    translate_regex(v).ok_or_else(|| invalid_regexp(v))
+                })
+                .transpose()?
         } else {
             None
         };
@@ -209,26 +344,19 @@ fn get_config(matches: &mut clap::ArgMatches) -> UResult<Config> {
         config.format = OutFormat::Roff;
         "[^ \t\n]+".clone_into(&mut config.context_regex);
     }
-    if let Some(regex) = matches
-        .remove_one::<String>(options::SENTENCE_REGEXP)
-        .map(|r| escape_trailing_backslash(&r))
-    {
+    if let Some(original) = matches.remove_one::<String>(options::SENTENCE_REGEXP) {
+        let regex = translate_regex(&original);
         // TODO: The regex crate used here is not fully compatible with GNU's regex implementation.
         // For example, it does not support backreferences.
         // In the future, we might want to switch to the fancy-regex crate for better compatibility.
 
         // Verify regex is valid and doesn't match empty string
-        let re = Regex::new(&regex).map_err(|error| {
-            USimpleError::new(
-                1,
-                translate!("ptx-error-invalid-regexp", "error" => error.to_string()),
-            )
-        })?;
+        let re = compile_regex(regex.as_deref(), &original)?;
         if re.is_match("") {
             return Err(USimpleError::new(1, translate!("ptx-error-empty-regexp")));
         }
 
-        config.sentence_regex = Some(regex);
+        config.sentence_regex = regex;
     }
     config.auto_ref = matches.get_flag(options::AUTO_REFERENCE);
     config.input_ref = matches.get_flag(options::REFERENCES);
