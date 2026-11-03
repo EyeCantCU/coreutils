@@ -23,3 +23,21 @@ for f in "${backport[@]}"; do
   grep -qF "tests/$f" Makefile.in ||
     sed -i "s|^all_tests =.*|&\n  tests/$f\t\t\t\t\\\\|" Makefile.in
 done
+
+# Tests from $ver that a backport above replaces and that contradict it.  Drop
+# them from the tree and from both test lists so they are neither run nor
+# required by make.
+superseded=(
+  # The backported env/printenv.sh replaces it; the two expect opposite
+  # behaviour for QUOTING_STYLE on redirected output.
+  misc/printenv.sh
+)
+for f in "${superseded[@]}"; do
+  rm -f "tests/$f"
+  sed -i "\|^[[:space:]]*tests/${f}[[:space:]]*\\\\\$|d" tests/local.mk Makefile.in
+  # Fail loudly if the list format changed and an entry survived the deletion.
+  if grep -F "tests/${f}" tests/local.mk Makefile.in; then
+    echo "fetch-gnu.sh: could not remove tests/${f} from the test lists" >&2
+    exit 1
+  fi
+done
