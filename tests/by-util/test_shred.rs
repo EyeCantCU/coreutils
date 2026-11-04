@@ -3,7 +3,7 @@
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-// spell-checker:ignore wipesync couldnt
+// spell-checker:ignore wipesync couldnt rodir
 
 use uutests::at_and_ucmd;
 use uutests::new_ucmd;
@@ -588,6 +588,27 @@ fn test_couldnt_rename() {
         .args(&["-u", "/proc/self/mem"])
         .fails_with_code(1)
         .stderr_is("shred: /proc/self/mem: failed to remove: Operation not permitted\n");
+}
+
+#[test]
+#[cfg(unix)]
+fn test_remove_failure_still_deallocates() {
+    // The data is gone even if the file cannot be renamed or unlinked; one error is reported.
+    use std::os::unix::fs::PermissionsExt;
+    let (at, mut ucmd) = at_and_ucmd!();
+    at.mkdir("rodir");
+    at.write("rodir/0123456789", "secret");
+    let dir_perms = |mode| std::fs::Permissions::from_mode(mode);
+    std::fs::set_permissions(at.plus("rodir"), dir_perms(0o555)).unwrap();
+    let result = ucmd.args(&["-u", "rodir/0123456789"]).run();
+    std::fs::set_permissions(at.plus("rodir"), dir_perms(0o755)).unwrap();
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    result
+        .failure()
+        .stderr_only("shred: rodir/0123456789: failed to remove: Permission denied\n");
+    assert_eq!(at.read("rodir/0123456789"), "");
 }
 
 #[rstest::rstest]

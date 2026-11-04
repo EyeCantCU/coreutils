@@ -807,13 +807,13 @@ fn wipe_file(
     }
 
     if remove_method != RemoveMethod::None {
-        if is_stdout {
-            // Deallocate stdout's data for -u/--remove without renaming or
-            // unlinking the file that the descriptor refers to.
-            file.set_len(0).map_err_context(
-                || translate_text!("shred-failed-to-remove-file", "file" => display_path.maybe_quote()),
-            )?;
-        } else {
+        // Deallocate before touching the name so the data is gone even if renaming or
+        // unlinking fails; the file behind stdout is never renamed or unlinked.
+        file.set_len(0).map_err_context(
+            || translate_text!("shred-failed-to-remove-file", "file" => display_path.maybe_quote()),
+        )?;
+        drop(file);
+        if !is_stdout {
             do_remove(path, verbose, remove_method).map_err_context(
                 || translate_text!("shred-failed-to-remove-file", "file" => display_path.maybe_quote()),
             )?;
@@ -869,7 +869,7 @@ fn do_pass(
 
 /// Repeatedly renames the file with strings of decreasing length (most likely all 0s)
 /// Return the path of the file after its last successful renaming.
-/// Stops at the first failed rename.
+/// A failed rename moves on to a shorter name.
 fn wipe_name(orig_path: &Path, verbose: bool, remove_method: RemoveMethod) -> io::Result<PathBuf> {
     let file_name_len = orig_path.file_name().unwrap().len();
 
@@ -905,8 +905,11 @@ fn wipe_name(orig_path: &Path, verbose: bool, remove_method: RemoveMethod) -> io
                     last_path = new_path;
                     break;
                 }
-                // Ignore the error and stop here: the unlink in do_remove reports it
-                Err(_) => return Ok(last_path),
+                // The name was taken in the meantime: try the next one.
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                // Other failures would recur for every name of this length; the final
+                // unlink reports the file if it cannot be removed either.
+                Err(_) => break,
             }
         }
     }
